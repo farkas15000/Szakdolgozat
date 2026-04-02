@@ -1,8 +1,15 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from src.backend.app.core.database import get_db
 
 app = FastAPI()
+
+@app.get("/health")
+def health_check(db: Session = Depends(get_db)):
+    return {"status": "ok"}
 
 
 class Item(BaseModel):
