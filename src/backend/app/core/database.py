@@ -2,6 +2,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from src.backend.app.core.config import settings
+from src.backend.app.models.models import Base
 
 engine = create_engine(
     settings.DATABASE_URL,
@@ -13,8 +14,6 @@ SessionLocal = sessionmaker(
     autoflush=False,
     bind=engine,
 )
-
-Base = declarative_base()
 
 
 # FastAPI dependency

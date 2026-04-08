@@ -16,6 +16,8 @@ cd ./src/backend
 alembic upgrade head
 cd ../..
 
+python ./src/backend/app/core/seed_movielens.py --data-dir ./dataset/ml-latest-small
+
 # Start the application
 echo "Starting app..."
 exec "$@"
