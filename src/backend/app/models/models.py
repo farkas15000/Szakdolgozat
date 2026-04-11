@@ -93,6 +93,7 @@ class Movie(Base):
     recommendations: Mapped[list["Recommendation"]] = relationship(
         back_populates="movie"
     )
+    genome_scores: Mapped[list["GenomeScore"]] = relationship(back_populates="movie")
 
 
 class Genre(Base):
@@ -241,3 +242,35 @@ class Recommendation(Base):
 
     user: Mapped["User"] = relationship(back_populates="recommendations")
     movie: Mapped["Movie"] = relationship(back_populates="recommendations")
+
+
+# ---------------------------------------------------------------------------
+# Genome – ezt a részt add hozzá a meglévő models.py végéhez
+# ---------------------------------------------------------------------------
+
+class GenomeTag(Base):
+    __tablename__ = "genome_tags"
+
+    tag_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    tag: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+
+    scores: Mapped[list["GenomeScore"]] = relationship(back_populates="genome_tag")
+
+
+class GenomeScore(Base):
+    __tablename__ = "genome_scores"
+
+    movie_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("movies.movie_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tag_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("genome_tags.tag_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    relevance: Mapped[float] = mapped_column(Float, nullable=False)
+
+    movie: Mapped["Movie"] = relationship(back_populates="genome_scores")
+    genome_tag: Mapped["GenomeTag"] = relationship(back_populates="scores")

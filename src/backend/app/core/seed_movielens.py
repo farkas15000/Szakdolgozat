@@ -311,13 +311,17 @@ def seed_genome(data_dir: Path, valid_movie_ids: set[int]) -> None:
     tags_path = data_dir / "genome-tags.csv"
     log(f"genome-tags betöltése: {tags_path}")
     genome_tag_rows: list[dict] = []
-    with open(tags_path, encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            genome_tag_rows.append({
-                "tag_id": int(row["tagId"]),
-                "tag":    row["tag"].strip(),
-            })
+    try:
+        with open(tags_path, encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                genome_tag_rows.append({
+                    "tag_id": int(row["tagId"]),
+                    "tag":    row["tag"].strip(),
+                })
+    except FileNotFoundError as e:
+        log(f" No such file or directory: {tags_path}")
+        return
 
     with engine.begin() as conn:
         for batch in chunks(genome_tag_rows, 2_000):
