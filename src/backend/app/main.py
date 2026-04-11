@@ -4,8 +4,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from src.backend.app.core.database import get_db
+from src.backend.app.routers.auth_router import router as auth_router
 
 app = FastAPI()
+app.include_router(auth_router, prefix="/api/v1")
 
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):
