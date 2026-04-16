@@ -1,58 +1,72 @@
-"""MovieLens seed script – batch insert, idempotent.
+"""MovieLens seed script – pandas chunksize + psycopg2 execute_batch.
 
 Használat:
     python seed_movielens.py --data-dir /path/to/ml-latest
 
-A script a következő fájlokat várja a --data-dir mappában:
+Szükséges csomagok:
+    pip install pandas psycopg2-binary python-dotenv
+
+Fájlok a --data-dir mappában:
     movies.csv, ratings.csv, tags.csv,
     genome-tags.csv, genome-scores.csv
-
-Futtatás előtt győződj meg róla, hogy a DATABASE_URL környezeti
-változó be van állítva (vagy a .env fájl elérhető).
 """
 
 import argparse
-import csv
 import os
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy import Table as sa_table, column as sa_column, MetaData
-
+import pandas as pd
+import psycopg2
+import psycopg2.extras
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
-# Környezet betöltése
+# Környezet
 # ---------------------------------------------------------------------------
 
+load_dotenv(override=True)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     sys.exit("ERROR: DATABASE_URL nincs beállítva.")
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-Session = sessionmaker(bind=engine)
-metadata = MetaData()
-
 # ---------------------------------------------------------------------------
-# Konstansok
+# Batch méretek
 # ---------------------------------------------------------------------------
 
-MOVIE_BATCH   = 2_000
-RATING_BATCH  = 10_000
-TAG_BATCH     = 5_000
-GENOME_BATCH  = 20_000   # genome-scores sok sor → nagy batch
+MOVIE_BATCH        = 2_000
+RATING_CHUNK       = 200_000   # pandas chunk méret ratings.csv-hez
+RATING_BATCH       = 5_000     # execute_batch page_size
+TAG_CHUNK          = 100_000
+TAG_BATCH          = 5_000
+GENOME_CHUNK       = 500_000   # genome-scores.csv nagy fájl
+GENOME_BATCH       = 20_000
+USER_BATCH         = 5_000
 
 # ---------------------------------------------------------------------------
-# Segédfüggvények
+# Kapcsolat
 # ---------------------------------------------------------------------------
 
-def count_rows(table: str) -> int:
-    with engine.connect() as conn:
-        return conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+def get_conn() -> psycopg2.extensions.connection:
+    """Nyers psycopg2 kapcsolat a DATABASE_URL alapján."""
+    parsed = urlparse(DATABASE_URL)
+    return psycopg2.connect(
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+        dbname=parsed.path.lstrip("/"),
+        user=parsed.username,
+        password=parsed.password,
+    )
+
+
+def count_rows(conn, table: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        return cur.fetchone()[0]
 
 
 def log(msg: str) -> None:
@@ -60,313 +74,309 @@ def log(msg: str) -> None:
 
 
 def parse_year(title: str):
-    """Kivonja az évet a film címéből, pl. 'Toy Story (1995)' → 1995."""
-    m = re.search(r"\((\d{4})\)\s*$", title)
+    m = re.search(r"\((\d{4})\)\s*$", str(title))
     return int(m.group(1)) if m else None
 
 
-def chunks(lst: list, n: int):
-    for i in range(0, len(lst), n):
-        yield lst[i : i + n]
-
 # ---------------------------------------------------------------------------
-# Segéd: táblanévből SQLAlchemy Table objektum (reflection nélkül)
+# movies + genres + movie_genres
 # ---------------------------------------------------------------------------
 
-def text_table(name: str):
-    """Minimális Table proxy az insert dialektushoz."""
-    return sa_table(name, metadata, autoload_with=engine)
-
-
-# ---------------------------------------------------------------------------
-# Seed függvények
-# ---------------------------------------------------------------------------
-
-def seed_movies(data_dir: Path) -> dict[int, int]:
-    """
-    Betölti a movies.csv-t.
-    Visszaad egy {movielens_movie_id: movie_id} dict-et (itt 1:1, de
-    explicit visszaadjuk a konzisztencia kedvéért).
-    """
-    if count_rows("movies") > 0:
+def seed_movies(conn, data_dir: Path) -> set[int]:
+    if count_rows(conn, "movies") > 0:
         log("movies – már van adat, kihagyva.")
-        # Visszaadjuk a meglévő ID-kat a többi tábla seed-jéhez.
-        with engine.connect() as conn:
-            rows = conn.execute(text("SELECT movie_id FROM movies")).fetchall()
-        return {r[0]: r[0] for r in rows}
+        with conn.cursor() as cur:
+            cur.execute("SELECT movie_id FROM movies")
+            return {r[0] for r in cur.fetchall()}
 
     path = data_dir / "movies.csv"
     log(f"movies betöltése: {path}")
 
-    genres_seen: dict[str, int] = {}   # name → genre_id
-    movie_rows: list[dict] = []
-    movie_genre_rows: list[dict] = []
+    df = pd.read_csv(path, dtype={"movieId": int, "title": str, "genres": str})
 
-    with open(path, encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            movie_id  = int(row["movieId"])
-            title     = row["title"].strip()
-            year      = parse_year(title)
-            raw_genres = [g.strip() for g in row["genres"].split("|")
-                          if g.strip() and g.strip() != "(no genres listed)"]
+    # Genres kinyerése
+    genres_set: set[str] = set()
+    for raw in df["genres"]:
+        for g in str(raw).split("|"):
+            g = g.strip()
+            if g and g != "(no genres listed)":
+                genres_set.add(g)
 
-            movie_rows.append({
-                "movie_id":    movie_id,
-                "title":       title,
-                "release_year": year,
-            })
+    genre_list = sorted(genres_set)
+    genre_index = {g: i + 1 for i, g in enumerate(genre_list)}
 
-            for genre_name in raw_genres:
-                if genre_name not in genres_seen:
-                    genres_seen[genre_name] = len(genres_seen) + 1
-                movie_genre_rows.append({
-                    "movie_id":  movie_id,
-                    "genre_id":  genres_seen[genre_name],
-                })
-
-    # genres
-    genre_rows = [{"genre_id": gid, "name": name}
-                  for name, gid in genres_seen.items()]
-    with engine.begin() as conn:
-        conn.execute(
-            pg_insert(text_table("genres")).on_conflict_do_nothing(),
-            genre_rows,
+    # genres insert
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_batch(
+            cur,
+            "INSERT INTO genres (genre_id, name) VALUES (%s, %s) "
+            "ON CONFLICT DO NOTHING",
+            [(gid, name) for name, gid in genre_index.items()],
+            page_size=MOVIE_BATCH,
         )
-    log(f"  {len(genre_rows)} genre betöltve.")
+    conn.commit()
+    log(f"  {len(genre_list)} genre betöltve.")
 
-    # movies – batch
-    total = 0
-    with engine.begin() as conn:
-        for batch in chunks(movie_rows, MOVIE_BATCH):
-            conn.execute(
-                pg_insert(text_table("movies")).on_conflict_do_nothing(),
-                batch,
-            )
-            total += len(batch)
-    log(f"  {total} film betöltve.")
+    # movies insert
+    movie_rows = [
+        (int(row.movieId), row.title.strip(), parse_year(row.title))
+        for row in df.itertuples(index=False)
+    ]
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_batch(
+            cur,
+            "INSERT INTO movies (movie_id, title, release_year) "
+            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            movie_rows,
+            page_size=MOVIE_BATCH,
+        )
+    conn.commit()
+    log(f"  {len(movie_rows)} film betöltve.")
 
-    # movie_genres – batch
-    total = 0
-    with engine.begin() as conn:
-        for batch in chunks(movie_genre_rows, MOVIE_BATCH):
-            conn.execute(
-                pg_insert(text_table("movie_genres")).on_conflict_do_nothing(),
-                batch,
-            )
-            total += len(batch)
-    log(f"  {total} film–genre kapcsolat betöltve.")
+    # movie_genres insert
+    mg_rows: list[tuple[int, int]] = []
+    for row in df.itertuples(index=False):
+        mid = int(row.movieId)
+        for g in str(row.genres).split("|"):
+            g = g.strip()
+            if g and g != "(no genres listed)":
+                mg_rows.append((mid, genre_index[g]))
 
-    return {r["movie_id"]: r["movie_id"] for r in movie_rows}
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_batch(
+            cur,
+            "INSERT INTO movie_genres (movie_id, genre_id) "
+            "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            mg_rows,
+            page_size=MOVIE_BATCH,
+        )
+    conn.commit()
+    log(f"  {len(mg_rows)} film–genre kapcsolat betöltve.")
+
+    return {int(r[0]) for r in movie_rows}
 
 
-def seed_ratings(data_dir: Path, valid_movie_ids: set[int]) -> dict[int, str]:
-    """
-    Betölti a ratings.csv-t.
-    Minden MovieLens userId-hoz létrehoz egy user rekordot (display_name csak
-    placeholder, auth nélkül), és visszaadja a {ml_user_id: uuid} map-et.
-    """
-    if count_rows("ratings") > 0:
+# ---------------------------------------------------------------------------
+# ratings + placeholder users
+# ---------------------------------------------------------------------------
+
+def seed_ratings(conn, data_dir: Path, valid_movie_ids: set[int]) -> dict[int, str]:
+    if count_rows(conn, "ratings") > 0:
         log("ratings – már van adat, kihagyva.")
-        with engine.connect() as conn:
-            rows = conn.execute(
-                text("SELECT movielens_user_id, id FROM users "
-                     "WHERE movielens_user_id IS NOT NULL")
-            ).fetchall()
-        return {r[0]: str(r[1]) for r in rows}
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT movielens_user_id, id FROM users "
+                "WHERE movielens_user_id IS NOT NULL"
+            )
+            return {r[0]: str(r[1]) for r in cur.fetchall()}
 
     path = data_dir / "ratings.csv"
     log(f"ratings betöltése: {path} (nagy fájl, türelem...)")
 
-    # Gyűjtsük össze az egyedi userId-kat és az összes értékelést egy menetben
+    # 1. menet: egyedi user ID-k összegyűjtése
     ml_user_ids: set[int] = set()
-    rating_rows_raw: list[tuple] = []   # (userId, movieId, rating)
+    for chunk in pd.read_csv(
+        path,
+        dtype={"userId": int, "movieId": int, "rating": float},
+        usecols=["userId", "movieId"],
+        chunksize=RATING_CHUNK,
+    ):
+        chunk = chunk[chunk["movieId"].isin(valid_movie_ids)]
+        ml_user_ids.update(chunk["userId"].tolist())
 
-    with open(path, encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            uid = int(row["userId"])
-            mid = int(row["movieId"])
-            if mid not in valid_movie_ids:
-                continue
-            ml_user_ids.add(uid)
-            rating_rows_raw.append((uid, mid, float(row["rating"])))
+    log(f"  {len(ml_user_ids):,} egyedi MovieLens user azonosítva.")
 
-    log(f"  {len(ml_user_ids)} egyedi MovieLens user, "
-        f"{len(rating_rows_raw)} értékelés.")
+    # Placeholder userek létrehozása
+    ml_to_uuid: dict[int, str] = {uid: str(uuid.uuid4()) for uid in ml_user_ids}
+    user_rows = [
+        (
+            ml_to_uuid[uid],
+            f"ml_user_{uid}@seed.local",
+            "seeded_no_login",
+            f"MovieLens User {uid}",
+            uid,
+        )
+        for uid in ml_user_ids
+    ]
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_batch(
+            cur,
+            "INSERT INTO users "
+            "(id, email, hashed_password, display_name, movielens_user_id) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            user_rows,
+            page_size=USER_BATCH,
+        )
+    conn.commit()
+    log(f"  {len(user_rows):,} placeholder user létrehozva.")
 
-    # Users létrehozása – minden ML user kap egy placeholder fiókot
-    import uuid as uuid_module
-    ml_to_uuid: dict[int, str] = {}
-    user_rows: list[dict] = []
-    for ml_uid in ml_user_ids:
-        new_uuid = str(uuid_module.uuid4())
-        ml_to_uuid[ml_uid] = new_uuid
-        user_rows.append({
-            "id":                new_uuid,
-            "email":             f"ml_user_{ml_uid}@seed.local",
-            "hashed_password":   "seeded_no_login",
-            "display_name":      f"MovieLens User {ml_uid}",
-            "movielens_user_id": ml_uid,
-        })
-
-    with engine.begin() as conn:
-        for batch in chunks(user_rows, 2_000):
-            conn.execute(
-                pg_insert(text_table("users")).on_conflict_do_nothing(),
-                batch,
-            )
-    log(f"  {len(user_rows)} user placeholder létrehozva.")
-
-    # Ratings batch insert
-    rating_rows: list[dict] = []
-    for ml_uid, mid, rating in rating_rows_raw:
-        rating_rows.append({
-            "id":                str(uuid_module.uuid4()),
-            "user_id":           ml_to_uuid[ml_uid],
-            "movie_id":          mid,
-            "rating":            rating,
-            "movielens_user_id": ml_uid,
-        })
-
+    # 2. menet: ratings chunk-onként betöltve
     total = 0
-    with engine.begin() as conn:
-        for batch in chunks(rating_rows, RATING_BATCH):
-            conn.execute(
-                pg_insert(text_table("ratings")).on_conflict_do_nothing(),
-                batch,
+    for chunk in pd.read_csv(
+        path,
+        dtype={"userId": int, "movieId": int, "rating": float},
+        usecols=["userId", "movieId", "rating"],
+        chunksize=RATING_CHUNK,
+    ):
+        chunk = chunk[chunk["movieId"].isin(valid_movie_ids)]
+        chunk = chunk[chunk["userId"].isin(ml_user_ids)]
+
+        rows = [
+            (
+                str(uuid.uuid4()),
+                ml_to_uuid[int(r.userId)],
+                int(r.movieId),
+                float(r.rating),
+                int(r.userId),
             )
-            total += len(batch)
-            if total % 500_000 == 0:
-                log(f"  ... {total:,} értékelés betöltve")
+            for r in chunk.itertuples(index=False)
+        ]
+
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_batch(
+                cur,
+                "INSERT INTO ratings "
+                "(id, user_id, movie_id, rating, movielens_user_id) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                rows,
+                page_size=RATING_BATCH,
+            )
+        conn.commit()
+        total += len(rows)
+
+        if total % 1_000_000 == 0:
+            log(f"  ... {total:,} értékelés betöltve")
 
     log(f"  összesen {total:,} értékelés betöltve.")
     return ml_to_uuid
 
 
-def seed_tags(data_dir: Path,
-              valid_movie_ids: set[int],
-              ml_to_uuid: dict[int, str]) -> None:
-    if count_rows("tags") > 0:
+# ---------------------------------------------------------------------------
+# tags
+# ---------------------------------------------------------------------------
+
+def seed_tags(
+    conn, data_dir: Path, valid_movie_ids: set[int], ml_to_uuid: dict[int, str]
+) -> None:
+    if count_rows(conn, "tags") > 0:
         log("tags – már van adat, kihagyva.")
         return
 
     path = data_dir / "tags.csv"
     log(f"tags betöltése: {path}")
 
-    import uuid as uuid_module
-    tag_rows: list[dict] = []
-
-    with open(path, encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            ml_uid = int(row["userId"])
-            mid    = int(row["movieId"])
-            tag    = row["tag"].strip()
-            if mid not in valid_movie_ids or ml_uid not in ml_to_uuid or not tag:
-                continue
-            tag_rows.append({
-                "id":                str(uuid_module.uuid4()),
-                "user_id":           ml_to_uuid[ml_uid],
-                "movie_id":          mid,
-                "tag":               tag,
-                "movielens_user_id": ml_uid,
-            })
-
     total = 0
-    with engine.begin() as conn:
-        for batch in chunks(tag_rows, TAG_BATCH):
-            conn.execute(
-                pg_insert(text_table("tags")).on_conflict_do_nothing(),
-                batch,
+    valid_users = set(ml_to_uuid.keys())
+
+    for chunk in pd.read_csv(
+        path,
+        dtype={"userId": int, "movieId": int, "tag": str},
+        usecols=["userId", "movieId", "tag"],
+        chunksize=TAG_CHUNK,
+    ):
+        chunk = chunk[chunk["movieId"].isin(valid_movie_ids)]
+        chunk = chunk[chunk["userId"].isin(valid_users)]
+        chunk = chunk[chunk["tag"].notna()]
+        chunk["tag"] = chunk["tag"].str.strip()
+        chunk = chunk[chunk["tag"] != ""]
+
+        rows = [
+            (
+                str(uuid.uuid4()),
+                ml_to_uuid[int(r.userId)],
+                int(r.movieId),
+                str(r.tag),
+                int(r.userId),
             )
-            total += len(batch)
+            for r in chunk.itertuples(index=False)
+        ]
+        if not rows:
+            continue
+
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_batch(
+                cur,
+                "INSERT INTO tags "
+                "(id, user_id, movie_id, tag, movielens_user_id) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                rows,
+                page_size=TAG_BATCH,
+            )
+        conn.commit()
+        total += len(rows)
 
     log(f"  {total:,} tag betöltve.")
 
 
-def seed_genome(data_dir: Path, valid_movie_ids: set[int]) -> None:
-    """
-    genome-tags.csv + genome-scores.csv betöltése.
-    A genome_scores táblát külön kell létrehozni (nem része az alap sémának),
-    ezért ez a függvény ellenőrzi, hogy létezik-e a tábla.
-    """
-    # Ellenőrzés: létezik-e a genome_scores tábla?
-    with engine.connect() as conn:
-        exists = conn.execute(text(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
-            "WHERE table_name = 'genome_scores')"
-        )).scalar()
+# ---------------------------------------------------------------------------
+# genome-tags + genome-scores
+# ---------------------------------------------------------------------------
 
-    if not exists:
-        log("genome_scores tábla nem létezik – kihagyva. "
-            "(Hozd létre Alembic migrációval, ha kell.)")
-        return
+def seed_genome(conn, data_dir: Path, valid_movie_ids: set[int]) -> None:
+    # Tábla létezik-e?
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT EXISTS ("
+            "  SELECT 1 FROM information_schema.tables"
+            "  WHERE table_name = 'genome_scores'"
+            ")"
+        )
+        if not cur.fetchone()[0]:
+            log("genome_scores tábla nem létezik – kihagyva.")
+            return
 
-    if count_rows("genome_scores") > 0:
+    if count_rows(conn, "genome_scores") > 0:
         log("genome_scores – már van adat, kihagyva.")
         return
 
-    # genome-tags.csv → genome_tags tábla
+    # genome-tags
     tags_path = data_dir / "genome-tags.csv"
     log(f"genome-tags betöltése: {tags_path}")
-    genome_tag_rows: list[dict] = []
-    try:
-        with open(tags_path, encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                genome_tag_rows.append({
-                    "tag_id": int(row["tagId"]),
-                    "tag":    row["tag"].strip(),
-                })
-    except FileNotFoundError as e:
-        log(f" No such file or directory: {tags_path}")
-        return
+    gt_df = pd.read_csv(tags_path, dtype={"tagId": int, "tag": str})
+    gt_rows = [(int(r.tagId), str(r.tag).strip()) for r in gt_df.itertuples(index=False)]
 
-    with engine.begin() as conn:
-        for batch in chunks(genome_tag_rows, 2_000):
-            conn.execute(
-                pg_insert(text_table("genome_tags")).on_conflict_do_nothing(),
-                batch,
-            )
-    log(f"  {len(genome_tag_rows)} genome-tag betöltve.")
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_batch(
+            cur,
+            "INSERT INTO genome_tags (tag_id, tag) VALUES (%s, %s) "
+            "ON CONFLICT DO NOTHING",
+            gt_rows,
+            page_size=2_000,
+        )
+    conn.commit()
+    log(f"  {len(gt_rows)} genome-tag betöltve.")
 
-    # genome-scores.csv – nagy fájl, streaming olvasás
+    # genome-scores – streaming chunk
     scores_path = data_dir / "genome-scores.csv"
     log(f"genome-scores betöltése: {scores_path} (nagy fájl, türelem...)")
 
     total = 0
-    batch: list[dict] = []
+    for chunk in pd.read_csv(
+        scores_path,
+        dtype={"movieId": int, "tagId": int, "relevance": float},
+        chunksize=GENOME_CHUNK,
+    ):
+        chunk = chunk[chunk["movieId"].isin(valid_movie_ids)]
+        rows = [
+            (int(r.movieId), int(r.tagId), float(r.relevance))
+            for r in chunk.itertuples(index=False)
+        ]
+        if not rows:
+            continue
 
-    with open(scores_path, encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        with engine.begin() as conn:
-            for row in reader:
-                mid = int(row["movieId"])
-                if mid not in valid_movie_ids:
-                    continue
-                batch.append({
-                    "movie_id":   mid,
-                    "tag_id":     int(row["tagId"]),
-                    "relevance":  float(row["relevance"]),
-                })
-                if len(batch) >= GENOME_BATCH:
-                    conn.execute(
-                        pg_insert(text_table("genome_scores"))
-                        .on_conflict_do_nothing(),
-                        batch,
-                    )
-                    total += len(batch)
-                    batch = []
-                    if total % 1_000_000 == 0:
-                        log(f"  ... {total:,} genome-score betöltve")
-            if batch:
-                conn.execute(
-                    pg_insert(text_table("genome_scores"))
-                    .on_conflict_do_nothing(),
-                    batch,
-                )
-                total += len(batch)
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_batch(
+                cur,
+                "INSERT INTO genome_scores (movie_id, tag_id, relevance) "
+                "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                rows,
+                page_size=GENOME_BATCH,
+            )
+        conn.commit()
+        total += len(rows)
+
+        if total % 200_000 == 0:
+            log(f"  ... {total:,} genome-score betöltve")
 
     log(f"  összesen {total:,} genome-score betöltve.")
 
@@ -375,38 +385,30 @@ def seed_genome(data_dir: Path, valid_movie_ids: set[int]) -> None:
 # Belépési pont
 # ---------------------------------------------------------------------------
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="MovieLens seed script")
     parser.add_argument(
         "--data-dir",
         required=True,
         type=Path,
-        help="A ml-latest mappa elérési útja (ahol a CSV-k vannak)",
+        help="A ml-latest mappa elérési útja",
     )
     args = parser.parse_args()
 
-    data_dir: Path = args.data_dir
-    print("Data path:")
-    print(data_dir)
-
-    if not data_dir.exists():
-        sys.exit(f"ERROR: A megadott mappa nem létezik: {data_dir}")
+    if not args.data_dir.exists():
+        sys.exit(f"ERROR: A megadott mappa nem létezik: {args.data_dir}")
 
     start = time.time()
-    log(f"Seed megkezdve: {data_dir}")
+    log(f"Seed megkezdve: {args.data_dir}")
 
-    # 1. Filmek + genre-ok
-    movie_id_map = seed_movies(data_dir)
-    valid_movie_ids = set(movie_id_map.keys())
-
-    # 2. Értékelések + placeholder userek
-    ml_to_uuid = seed_ratings(data_dir, valid_movie_ids)
-
-    # 3. Tagek
-    seed_tags(data_dir, valid_movie_ids, ml_to_uuid)
-
-    # 4. Genome (opcionális – csak ha létezik a tábla)
-    seed_genome(data_dir, valid_movie_ids)
+    conn = get_conn()
+    try:
+        valid_movie_ids = seed_movies(conn, args.data_dir)
+        ml_to_uuid = seed_ratings(conn, args.data_dir, valid_movie_ids)
+        seed_tags(conn, args.data_dir, valid_movie_ids, ml_to_uuid)
+        seed_genome(conn, args.data_dir, valid_movie_ids)
+    finally:
+        conn.close()
 
     elapsed = time.time() - start
     log(f"Seed kész! Eltelt idő: {elapsed:.1f}s")
