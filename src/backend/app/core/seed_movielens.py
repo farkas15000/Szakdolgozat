@@ -23,13 +23,11 @@ from urllib.parse import urlparse
 import pandas as pd
 import psycopg2
 import psycopg2.extras
-from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
 # Környezet
 # ---------------------------------------------------------------------------
 
-load_dotenv(override=True)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     sys.exit("ERROR: DATABASE_URL nincs beállítva.")

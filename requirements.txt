@@ -7,3 +7,6 @@ fastapi
 python-jose
 passlib
 email-validator
+cornac
+numpy
+pandas

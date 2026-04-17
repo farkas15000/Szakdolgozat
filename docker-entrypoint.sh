@@ -18,6 +18,10 @@ cd ../..
 
 python ./src/backend/app/core/seed_movielens.py --data-dir ./dataset/ml-latest-small
 
+python ./src/backend/app/recommender/train.py --model both
+
+python ./src/backend/app/recommender/batch_generate.py
+
 # Start the application
 echo "Starting app..."
 exec "$@"
