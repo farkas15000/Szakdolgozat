@@ -1,4 +1,17 @@
-FROM python:3.11-slim
+### Stage 1: Frontend build ###
+FROM node:lts-alpine AS frontend
+WORKDIR /app/src/frontend
+
+COPY src/frontend/package*.json ./
+RUN npm install
+
+COPY src/frontend .
+
+RUN npm run build
+
+
+### Stage 2: Backend runtime ###
+FROM python:3.11-slim AS backend
 
 WORKDIR /app
 ENV PYTHONPATH="/app"
@@ -12,6 +25,8 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY . .
+
+COPY --from=frontend /app/src/frontend/dist ./dist
 
 COPY docker-entrypoint.sh /usr/local/bin/
 ENTRYPOINT ["docker-entrypoint.sh"]

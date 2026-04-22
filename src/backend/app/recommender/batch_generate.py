@@ -98,7 +98,7 @@ def main() -> None:
                     logger.info(f"  {i}/{len(user_ids)} user feldolgozva...")
 
             except Exception as e:
-                logger.warning(f"User {user_id} ajánlás sikertelen: {e}")
+                #logger.warning(f"User {user_id} ajánlás sikertelen: {e}")
                 db.rollback()
                 failed += 1
 

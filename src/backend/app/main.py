@@ -1,7 +1,10 @@
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+import os
 
 from src.backend.app.core.database import get_db
 from src.backend.app.routers.auth_router import router as auth_router
@@ -23,17 +26,19 @@ app.include_router(rec_router, prefix="/api/v1")
 def health_check(db: Session = Depends(get_db)):
     return {"status": "ok"}
 
+dist_path = os.path.join("./dist")
+
+app.mount("/assets", StaticFiles(directory=f"{dist_path}/assets"), name="assets")
+
+@app.get("/")
+def serve_index():
+    return FileResponse(f"{dist_path}/index.html")
 
 class Item(BaseModel):
     text: str = None
     is_done: bool = False
 
 items = []
-
-@app.get("/", response_class=HTMLResponse)
-@app.get("/posts", response_class=HTMLResponse, include_in_schema=False)
-def index():
-    return f"<h1>Hello {1+1}</h1>"
 
 @app.post("/items")
 def create_item(item: Item):
