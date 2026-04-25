@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.responses import HTMLResponse
+from fastapi import Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import os
@@ -33,6 +34,11 @@ app.mount("/assets", StaticFiles(directory=f"{dist_path}/assets"), name="assets"
 @app.get("/")
 def serve_index():
     return FileResponse(f"{dist_path}/index.html")
+
+@app.get("/{full_path:path}")
+def catch_all(full_path: str):
+    return FileResponse(f"{dist_path}/index.html")
+
 
 class Item(BaseModel):
     text: str = None

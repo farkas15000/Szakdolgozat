@@ -63,6 +63,7 @@
           :title="movie.title"
           :release-year="movie.release_year"
           :genres="movie.genres"
+          :poster-url="movie.poster_url"
           @click="$router.push(`/movies/${movie.movie_id}`)"
         />
       </div>
@@ -93,10 +94,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, watch, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { moviesApi } from '@/api'
 import MovieCard from '@/components/MovieCard.vue'
 
+const route       = useRoute()
+const router      = useRouter()
 const currentYear = new Date().getFullYear()
 
 const movies     = ref([])
@@ -113,26 +117,64 @@ const filters = reactive({
   year_to:   null,
 })
 
+// ---------------------------------------------------------------------------
+// URL → state (oldalbetöltés és böngésző vissza/előre)
+// ---------------------------------------------------------------------------
+
+function readFromQuery() {
+  const q       = route.query
+  filters.title     = q.title     ? String(q.title)             : ''
+  filters.genre     = q.genre     ? String(q.genre)             : ''
+  filters.year_from = q.year_from ? Number(q.year_from)         : null
+  filters.year_to   = q.year_to   ? Number(q.year_to)           : null
+  page.value        = q.page      ? Math.max(1, Number(q.page)) : 1
+}
+
+// ---------------------------------------------------------------------------
+// state → URL
+// ---------------------------------------------------------------------------
+
+function pushQuery() {
+  router.replace({
+    query: {
+      ...(filters.title             && { title:     filters.title }),
+      ...(filters.genre             && { genre:     filters.genre }),
+      ...(filters.year_from != null && { year_from: String(filters.year_from) }),
+      ...(filters.year_to   != null && { year_to:   String(filters.year_to) }),
+      ...(page.value > 1            && { page:      String(page.value) }),
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Eseménykezelők
+// ---------------------------------------------------------------------------
+
 let debounceTimer = null
 
 function onFilterChange() {
   clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => {
     page.value = 1
-    loadMovies()
+    pushQuery()
   }, 400)
 }
 
 function resetFilters() {
   Object.assign(filters, { title: '', genre: '', year_from: null, year_to: null })
   page.value = 1
-  loadMovies()
+  pushQuery()
 }
 
 function changePage(p) {
   page.value = p
-  loadMovies()
+  pushQuery()
+  window.scrollTo({ top: 0, behavior: 'smooth' })
 }
+
+// ---------------------------------------------------------------------------
+// API hívás
+// ---------------------------------------------------------------------------
 
 async function loadMovies() {
   loading.value = true
@@ -140,10 +182,10 @@ async function loadMovies() {
     const params = {
       page:      page.value,
       page_size: 20,
-      ...(filters.title     && { title:     filters.title }),
-      ...(filters.genre     && { genre:     filters.genre }),
-      ...(filters.year_from && { year_from: filters.year_from }),
-      ...(filters.year_to   && { year_to:   filters.year_to }),
+      ...(filters.title             && { title:     filters.title }),
+      ...(filters.genre             && { genre:     filters.genre }),
+      ...(filters.year_from != null && { year_from: filters.year_from }),
+      ...(filters.year_to   != null && { year_to:   filters.year_to }),
     }
     const { data } = await moviesApi.list(params)
     movies.value     = data.items
@@ -159,7 +201,27 @@ async function loadGenres() {
   genres.value = data
 }
 
+// ---------------------------------------------------------------------------
+// URL változás figyelése (vissza/előre gomb)
+// ---------------------------------------------------------------------------
+
+watch(
+  () => route.query,
+  (newQ, oldQ) => {
+    // Csak akkor reagál, ha ténylegesen változott valami
+    if (JSON.stringify(newQ) !== JSON.stringify(oldQ)) {
+      readFromQuery()
+      loadMovies()
+    }
+  },
+)
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
 onMounted(() => {
+  readFromQuery()
   loadMovies()
   loadGenres()
 })

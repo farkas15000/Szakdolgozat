@@ -66,9 +66,13 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, watch, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ratingsApi } from '@/api'
 import StarRating from '@/components/StarRating.vue'
+
+const route  = useRoute()
+const router = useRouter()
 
 const ratings    = ref([])
 const loading    = ref(false)
@@ -76,10 +80,44 @@ const page       = ref(1)
 const totalPages = ref(1)
 const total      = ref(0)
 
+// ---------------------------------------------------------------------------
+// URL → state
+// ---------------------------------------------------------------------------
+
+function readFromQuery() {
+  page.value = route.query.page ? Math.max(1, Number(route.query.page)) : 1
+}
+
+// ---------------------------------------------------------------------------
+// state → URL
+// ---------------------------------------------------------------------------
+
+function pushQuery() {
+  router.replace({
+    query: {
+      ...(page.value > 1 && { page: String(page.value) }),
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Eseménykezelők
+// ---------------------------------------------------------------------------
+
+function changePage(p) {
+  page.value = p
+  pushQuery()
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+// ---------------------------------------------------------------------------
+// API hívás
+// ---------------------------------------------------------------------------
+
 async function loadRatings() {
   loading.value = true
   try {
-    const { data } = await ratingsApi.list({ page: page.value, page_size: 20 })
+    const { data } = await ratingsApi.list({ page: page.value, page_size: 10 })
     ratings.value    = data.items
     total.value      = data.total
     totalPages.value = data.pages
@@ -91,13 +129,33 @@ async function loadRatings() {
 async function deleteRating(movieId) {
   await ratingsApi.remove(movieId)
   ratings.value = ratings.value.filter((r) => r.movie_id !== movieId)
-  total.value -= 1
+  total.value  -= 1
+  // Ha az oldal kiürül törlés után, lépj vissza egyet
+  if (ratings.value.length === 0 && page.value > 1) {
+    changePage(page.value - 1)
+  }
 }
 
-function changePage(p) {
-  page.value = p
+// ---------------------------------------------------------------------------
+// URL változás figyelése (vissza/előre gomb)
+// ---------------------------------------------------------------------------
+
+watch(
+  () => route.query.page,
+  (newPage, oldPage) => {
+    if (newPage !== oldPage) {
+      readFromQuery()
+      loadRatings()
+    }
+  },
+)
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
+onMounted(() => {
+  readFromQuery()
   loadRatings()
-}
-
-onMounted(loadRatings)
+})
 </script>
