@@ -116,15 +116,25 @@ def seed_movies(conn, data_dir: Path) -> set[int]:
     log(f"  {len(genre_list)} genre betöltve.")
 
     # movies insert
+
+    lpath = data_dir / "links.csv"
+    log(f"links betöltése: {lpath}")
+    lf = pd.read_csv(lpath, dtype={"movieId": int, "imdbId": str, "tmdbId": str})
+
     movie_rows = [
-        (int(row.movieId), row.title.strip(), parse_year(row.title))
-        for row in df.itertuples(index=False)
+         (int(row[0].movieId),
+         row[0].title.replace("" if (year:=parse_year(row[0].title)) is None else f", The ({year})", "").replace("" if year is None else f"({year})", "").strip(),
+         year,
+         row[1].imdbId,
+         row[1].tmdbId)
+         for row in zip(df.itertuples(index=False), lf.itertuples(index=False))
     ]
+
     with conn.cursor() as cur:
         psycopg2.extras.execute_batch(
             cur,
-            "INSERT INTO movies (movie_id, title, release_year) "
-            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            "INSERT INTO movies (movie_id, title, release_year, imdb_id, tmdb_id) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
             movie_rows,
             page_size=MOVIE_BATCH,
         )

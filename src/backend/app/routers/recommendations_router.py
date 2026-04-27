@@ -25,6 +25,7 @@ from src.backend.app.schemas.recommendations_schemas import (
     RecommendationResponse,
     RecommendationsListResponse,
 )
+from src.backend.app.services.tmdb import get_poster_url, get_poster_urls_bulk
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @router.get("", response_model=RecommendationsListResponse)
-def get_recommendations(
+async def get_recommendations(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     top_n: int = Query(default=20, ge=1, le=100),
@@ -63,7 +64,7 @@ def get_recommendations(
             logger.info(
                 f"Cache hit: {len(cached)} ajánlás user {user_id[:8]}... számára."
             )
-            return _build_response(cached, db, source="precomputed")
+            return await _build_response(cached, db, source="precomputed")
 
     # --- 2. Real-time generálás ---
     logger.info(f"Real-time ajánlás generálás: user {user_id[:8]}...")
@@ -109,7 +110,7 @@ def get_recommendations(
     for r in new_recs:
         db.refresh(r)
 
-    return _build_response(new_recs, db, source="realtime")
+    return await _build_response(new_recs, db, source="realtime")
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +143,7 @@ def record_click(
 # Segédfüggvények
 # ---------------------------------------------------------------------------
 
-def _build_response(
+async def _build_response(
     recs: list[Recommendation],
     db: Session,
     source: str,
@@ -156,6 +157,12 @@ def _build_response(
         ).scalars().all()
     }
 
+    # Poster URL-ek párhuzamos lekérése a TMDB-ből
+    tmdb_ids = [m.tmdb_id for m in movies.values() if m.tmdb_id]
+    poster_map: dict[str, str | None] = {}
+    if tmdb_ids:
+        poster_map = await get_poster_urls_bulk(tmdb_ids)
+
     items = []
     for rec in recs:
         movie = movies.get(rec.movie_id)
@@ -168,6 +175,7 @@ def _build_response(
                 score=rec.score,
                 algorithm=rec.algorithm,
                 was_clicked=rec.was_clicked,
+                poster_url=poster_map.get(movie.tmdb_id) if movie else None,
             )
         )
 

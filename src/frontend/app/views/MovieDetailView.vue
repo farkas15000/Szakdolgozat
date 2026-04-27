@@ -11,7 +11,7 @@
             {{ movie.release_year ?? 'Ismeretlen év' }}
             <span v-if="movie.imdb_id" class="ml-2">
               · <a
-                :href="`https://www.imdb.com/title/${movie.imdb_id}`"
+                :href="`https://www.imdb.com/title/tt${movie.imdb_id}`"
                 target="_blank"
                 class="text-primary-600 hover:underline text-sm"
               >IMDb</a>
@@ -49,6 +49,28 @@
           </p>
         </div>
       </div>
+
+      <!-- Poster -->
+        <div class="relative w-full bg-gray-100 aspect-[2/3] overflow-hidden">
+          <img
+            v-if="movie.poster_url && !imgError"
+            :src="movie.poster_url"
+            :alt="title"
+            class="w-full h-full object-cover"
+            loading="lazy"
+            @error="imgError = true"
+          />
+          <!-- Fallback ha nincs poster -->
+          <div
+            v-else
+            class="w-full h-full flex flex-col items-center justify-center
+                   bg-gradient-to-br from-gray-100 to-gray-200 text-gray-400"
+          >
+            <span class="text-4xl mb-2">🎬</span>
+            <span class="text-xs text-center px-2 line-clamp-2">{{ movie.poster_url }}</span>
+          </div>
+        </div>
+
     </div>
 
     <!-- Visszajelzés gombok (implicit feedback) -->
@@ -89,6 +111,7 @@ const existingRating = ref(null)
 const ratingMsg      = ref('')
 const ratingMsgColor = ref('text-green-600')
 const interactionSent = ref(false)
+const imgError       = ref(false)
 
 async function loadMovie() {
   loading.value = true

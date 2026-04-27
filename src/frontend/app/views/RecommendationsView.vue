@@ -45,6 +45,7 @@
           :release-year="rec.release_year"
           :score="rec.score"
           :algorithm="rec.algorithm"
+          :poster-url="rec.poster_url"
           @click="handleCardClick(rec)"
         />
       </div>
@@ -102,5 +103,5 @@ async function handleCardClick(rec) {
   router.push(`/movies/${rec.movie_id}`)
 }
 
-onMounted(() => loadRecommendations())
+onMounted(() => loadRecommendations(true))
 </script>

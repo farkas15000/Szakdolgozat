@@ -11,6 +11,7 @@ class RecommendationResponse(BaseModel):
     score: float
     algorithm: str
     was_clicked: bool
+    poster_url: str | None = None
 
 
 class RecommendationsListResponse(BaseModel):

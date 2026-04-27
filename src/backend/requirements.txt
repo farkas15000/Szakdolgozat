@@ -10,3 +10,4 @@ email-validator
 cornac
 numpy
 pandas
+httpx

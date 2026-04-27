@@ -13,20 +13,9 @@ from src.backend.app.schemas.movies_schemas import (
     MovieSummary,
     PaginatedMovies,
 )
+from src.backend.app.services.tmdb import get_poster_url, get_poster_urls_bulk
 
 router = APIRouter(prefix="/movies", tags=["movies"])
-
-# ---------------------------------------------------------------------------
-# Segéd: Movie → MovieSummary (genre nevek listája)
-# ---------------------------------------------------------------------------
-
-def _to_summary(movie: Movie) -> MovieSummary:
-    return MovieSummary(
-        movie_id=movie.movie_id,
-        title=movie.title,
-        release_year=movie.release_year,
-        genres=[g.name for g in movie.genres],
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +24,7 @@ def _to_summary(movie: Movie) -> MovieSummary:
 # ---------------------------------------------------------------------------
 
 @router.get("", response_model=PaginatedMovies)
-def list_movies(
+async def list_movies(
     db: Session = Depends(get_db),
     page: Annotated[int, Query(ge=1, description="Oldalszám (1-től)")] = 1,
     page_size: Annotated[
@@ -75,18 +64,35 @@ def list_movies(
     if year_to is not None:
         query = query.where(Movie.release_year <= year_to)
 
-    # --- Összes találat száma ---
-    count_query = select(func.count()).select_from(query.subquery())
-    total: int = db.execute(count_query).scalar_one()
+    total: int = db.execute(
+        select(func.count()).select_from(query.subquery())
+    ).scalar_one()
 
-    # --- Lapozás ---
-    offset = (page - 1) * page_size
     movies = db.execute(
-        query.order_by(Movie.title).offset(offset).limit(page_size)
+        query.order_by(Movie.title)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).scalars().all()
 
+    # Poster URL-ek párhuzamos lekérése a TMDB-ből
+    tmdb_ids = [m.tmdb_id for m in movies if m.tmdb_id]
+    poster_map: dict[str, str | None] = {}
+    if tmdb_ids:
+        poster_map = await get_poster_urls_bulk(tmdb_ids)
+
+    items = [
+        MovieSummary(
+            movie_id=m.movie_id,
+            title=m.title,
+            release_year=m.release_year,
+            genres=[g.name for g in m.genres],
+            poster_url=poster_map.get(m.tmdb_id) if m.tmdb_id else None,
+        )
+        for m in movies
+    ]
+
     return PaginatedMovies(
-        items=[_to_summary(m) for m in movies],
+        items=items,
         total=total,
         page=page,
         page_size=page_size,
@@ -96,7 +102,6 @@ def list_movies(
 
 # ---------------------------------------------------------------------------
 # GET /movies/genres
-# Az összes elérhető műfaj listája (szűrő feltöltéséhez)
 # ---------------------------------------------------------------------------
 
 @router.get("/genres", response_model=list[str])
@@ -109,11 +114,10 @@ def list_genres(db: Session = Depends(get_db)) -> list[str]:
 
 # ---------------------------------------------------------------------------
 # GET /movies/{movie_id}
-# Egy film részletes adatai
 # ---------------------------------------------------------------------------
 
 @router.get("/{movie_id}", response_model=MovieDetail)
-def get_movie(movie_id: int, db: Session = Depends(get_db)) -> MovieDetail:
+async def get_movie(movie_id: int, db: Session = Depends(get_db)) -> MovieDetail:
     movie = db.execute(
         select(Movie)
         .options(selectinload(Movie.genres))
@@ -126,11 +130,16 @@ def get_movie(movie_id: int, db: Session = Depends(get_db)) -> MovieDetail:
             detail=f"A(z) {movie_id} azonosítójú film nem található.",
         )
 
+    poster_url = None
+    if movie.tmdb_id:
+        poster_url = await get_poster_url(movie.tmdb_id)
+
     return MovieDetail(
         movie_id=movie.movie_id,
         title=movie.title,
         release_year=movie.release_year,
         imdb_id=movie.imdb_id,
         tmdb_id=movie.tmdb_id,
-        genres=[g for g in movie.genres],
+        genres=list(movie.genres),
+        poster_url=poster_url,
     )

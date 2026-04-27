@@ -10,30 +10,32 @@ class GenreResponse(BaseModel):
 
 
 class MovieSummary(BaseModel):
-    """Listanézet – könnyű, genre nevek stringként."""
-    movie_id: int
-    title: str
+    """Listanézet – könnyű, genre nevek stringként, poster URL-lel."""
+    movie_id:     int
+    title:        str
     release_year: int | None
-    genres: list[str]
+    genres:       list[str]
+    poster_url:   str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class MovieDetail(BaseModel):
-    """Részletes nézet – genre objektumokkal."""
-    movie_id: int
-    title: str
+    """Részletes nézet – genre objektumokkal és poster URL-lel."""
+    movie_id:     int
+    title:        str
     release_year: int | None
-    imdb_id: str | None
-    tmdb_id: str | None
-    genres: list[GenreResponse]
+    imdb_id:      str | None
+    tmdb_id:      str | None
+    genres:       list[GenreResponse]
+    poster_url:   str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedMovies(BaseModel):
-    items: list[MovieSummary]
-    total: int
-    page: int
+    items:     list[MovieSummary]
+    total:     int
+    page:      int
     page_size: int
-    pages: int
+    pages:     int
