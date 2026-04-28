@@ -13,6 +13,7 @@ from src.backend.app.routers.movies_router import router as movies_router
 from src.backend.app.routers.ratings_router import router as ratings_router
 from src.backend.app.routers.interactions_router import router as interactions_router
 from src.backend.app.routers.recommendations_router import router as rec_router
+from src.backend.app.routers.profile_router import router as profile_router
 
 app = FastAPI()
 
@@ -21,6 +22,7 @@ app.include_router(movies_router, prefix="/api/v1")
 app.include_router(ratings_router, prefix="/api/v1")
 app.include_router(interactions_router, prefix="/api/v1")
 app.include_router(rec_router, prefix="/api/v1")
+app.include_router(profile_router, prefix="/api/v1")
 
 
 @app.get("/health")

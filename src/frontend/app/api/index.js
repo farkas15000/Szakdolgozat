@@ -44,3 +44,15 @@ export const recommendationsApi = {
   list: (params) => client.get('/recommendations', { params }),
   click: (id) => client.post(`/recommendations/${id}/click`),
 }
+
+// ---------------------------------------------------------------------------
+// Profile
+// ---------------------------------------------------------------------------
+export const profileApi = {
+  updateDisplayName: (display_name) =>
+    client.patch('/profile/display-name', { display_name }),
+  updatePassword: (current_password, new_password) =>
+    client.patch('/profile/password', { current_password, new_password }),
+  deleteAccount: (password) =>
+    client.delete('/profile', { data: { password } }),
+}

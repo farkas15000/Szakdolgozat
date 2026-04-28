@@ -27,6 +27,12 @@
             >
               Értékeléseim
             </RouterLink>
+            <RouterLink
+              to="/profile"
+              class="text-sm text-gray-600 hover:text-gray-900 transition-colors"
+            >
+              Profilom
+            </RouterLink>
             <span class="text-sm text-gray-400">|</span>
             <span class="text-sm text-gray-500">{{ auth.user?.display_name }}</span>
             <button class="btn-secondary text-xs py-1 px-3" @click="handleLogout">
