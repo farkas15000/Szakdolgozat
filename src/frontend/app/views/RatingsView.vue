@@ -27,7 +27,8 @@
             :to="`/movies/${r.movie_id}`"
             class="text-sm font-medium hover:text-primary-600 transition-colors"
           >
-            Film #{{ r.movie_id }}
+            {{movies.find(m => m.movie_id === r.movie_id).title}}<br>
+            {{movies.find(m => m.movie_id === r.movie_id).release_year}}
           </RouterLink>
 
           <div class="flex items-center gap-3">
@@ -68,13 +69,14 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ratingsApi } from '@/api'
+import { moviesApi, ratingsApi } from '@/api'
 import StarRating from '@/components/StarRating.vue'
 
 const route  = useRoute()
 const router = useRouter()
 
 const ratings    = ref([])
+const movies    = ref([])
 const loading    = ref(false)
 const page       = ref(1)
 const totalPages = ref(1)
@@ -121,6 +123,12 @@ async function loadRatings() {
     ratings.value    = data.items
     total.value      = data.total
     totalPages.value = data.pages
+
+    for (const rating of ratings.value){
+      const { data } = await moviesApi.get(rating.movie_id)
+      movies.value.push(data)
+    }
+
   } finally {
     loading.value = false
   }
@@ -129,6 +137,7 @@ async function loadRatings() {
 async function deleteRating(movieId) {
   await ratingsApi.remove(movieId)
   ratings.value = ratings.value.filter((r) => r.movie_id !== movieId)
+  movies.value = movies.value.filter((r) => r.movie_id !== movieId)
   total.value  -= 1
   // Ha az oldal kiürül törlés után, lépj vissza egyet
   if (ratings.value.length === 0 && page.value > 1) {

@@ -25,6 +25,7 @@ export const moviesApi = {
 // ---------------------------------------------------------------------------
 export const ratingsApi = {
   list: (params) => client.get('/ratings', { params }),
+  get: (movieId) => client.get(`/ratings/${movieId}`),
   create: (data) => client.post('/ratings', data),
   update: (movieId, data) => client.put(`/ratings/${movieId}`, data),
   remove: (movieId) => client.delete(`/ratings/${movieId}`),

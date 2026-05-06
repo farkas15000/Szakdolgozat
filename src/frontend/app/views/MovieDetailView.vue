@@ -133,8 +133,8 @@ async function loadMovie() {
 async function loadMyRating() {
   if (!auth.isLoggedIn) return
   try {
-    const { data } = await ratingsApi.list({ page_size: 100 })
-    const found = data.items.find((r) => r.movie_id === Number(route.params.id))
+    const { data } = await ratingsApi.get(route.params.id)
+    const found = data
     if (found) {
       existingRating.value = found
       selectedRating.value = found.rating

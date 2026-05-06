@@ -96,6 +96,28 @@ def create_rating(
     return rating
 
 
+@router.get("/{movie_id}", response_model=RatingResponse)
+def get_rating(
+    movie_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Rating:
+    rating = db.execute(
+        select(Rating).where(
+            Rating.user_id == current_user.id,
+            Rating.movie_id == movie_id,
+        )
+    ).scalar_one_or_none()
+
+    if rating is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Nem található értékelés ehhez a filmhez.",
+        )
+
+    return rating
+
+
 # ---------------------------------------------------------------------------
 # PUT /ratings/{movie_id}  – értékelés módosítása
 # ---------------------------------------------------------------------------
