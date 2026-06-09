@@ -51,12 +51,13 @@
       </div>
 
       <!-- Poster -->
-        <div class="relative w-full bg-gray-100 aspect-[2/3] overflow-hidden">
+        <br>
+        <div class="relative overflow-hidden mx-auto rounded-lg shadow">
           <img
             v-if="movie.poster_url && !imgError"
             :src="movie.poster_url"
             :alt="title"
-            class="w-full h-full object-cover"
+            class="w-200 h-full object-cover rounded-lg"
             loading="lazy"
             @error="imgError = true"
           />
