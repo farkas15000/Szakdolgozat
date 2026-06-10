@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: recommender_db
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  app:
+    build: .
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      DB_HOST: db
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS}
+
+      SVD_MODEL_PATH: ${SVD_MODEL_PATH}
+      CONTENT_MODEL_PATH: ${CONTENT_MODEL_PATH}
+      HYBRID_SVD_WEIGHT: ${HYBRID_SVD_WEIGHT}
+      MIN_RATINGS_FOR_SVD: ${MIN_RATINGS_FOR_SVD}
+      RECOMMENDATION_TOP_N: ${RECOMMENDATION_TOP_N}
+      RECOMMENDATION_EXPIRES_HOURS: ${RECOMMENDATION_EXPIRES_HOURS}
+
+      TMDB_API_KEY: ${TMDB_API_KEY}
+      TMDB_POSTER_SIZE: ${TMDB_POSTER_SIZE}
+    ports:
+      - "8000:8000"
+    volumes:
+      - recommender_model:/var/lib/recommender_model/data
+
+volumes:
+  postgres_data:
+  recommender_model:

@@ -1,0 +1,13 @@
+pydantic-settings
+sqlalchemy
+psycopg2-binary
+alembic
+uvicorn
+fastapi
+python-jose
+passlib
+email-validator
+cornac
+numpy
+pandas
+httpx
