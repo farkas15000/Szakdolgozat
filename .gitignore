@@ -1,4 +1,5 @@
 .idea
+.vscode
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -247,3 +248,4 @@ __screenshots__/
 
 # Vite
 *.timestamp-*-*.mjs
+/.vscode/
