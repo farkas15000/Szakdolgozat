@@ -135,10 +135,14 @@ class HybridRecommender:
             svd_results = self._svd.recommend(
                 user_id, candidate_ids, top_n=len(candidate_ids)
             )
-            svd_min = min(s for _, s in svd_results) if svd_results else 0.0
-            svd_max = max(s for _, s in svd_results) if svd_results else 1.0
-            rng = svd_max - svd_min or 1.0
-            svd_map = {mid: (s - svd_min) / rng for mid, s in svd_results}
+            if not svd_results:
+                logger.debug(f"User {user_id}: SVD nem adott eredményt, content-only fallbackre váltás")
+                use_svd = False
+            else:
+                svd_min = min(s for _, s in svd_results)
+                svd_max = max(s for _, s in svd_results)
+                rng = svd_max - svd_min or 1.0
+                svd_map = {mid: (s - svd_min) / rng for mid, s in svd_results}
 
         # --- Content scores ---
         content_map: dict[int, float] = {}

@@ -5,7 +5,6 @@ alembic
 uvicorn
 fastapi
 python-jose
-passlib
 email-validator
 cornac
 numpy

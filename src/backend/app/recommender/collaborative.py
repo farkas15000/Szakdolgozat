@@ -64,7 +64,7 @@ class SVDTrainer:
             raise ValueError("Nincsenek értékelések az adatbázisban.")
 
         uir_data = [
-            ((user_id), str(movie_id), float(rating))
+            (str(user_id), str(movie_id), float(rating))
             for user_id, movie_id, rating in rows
         ]
 
@@ -131,7 +131,7 @@ class SVDRecommender:
         Csak a candidate_movie_ids-ban szereplő filmeket veszi figyelembe.
         """
         uid_map = self._dataset.uid_map
-        if user_id not in uid_map:
+        if str(user_id) not in uid_map:
             logger.debug(f"Ismeretlen user a modellben: {user_id}...")
             return []
 
@@ -142,7 +142,7 @@ class SVDRecommender:
             movie_str = str(movie_id)
             if movie_str not in iid_map:
                 continue
-            score = self._model.score(uid_map[user_id], movie_id)
+            score = self._model.score(uid_map[str(user_id)], iid_map[movie_str])
             predictions.append((movie_id, float(score)))
 
         predictions.sort(key=lambda x: x[1], reverse=True)
