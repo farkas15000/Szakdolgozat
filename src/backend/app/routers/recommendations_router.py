@@ -12,14 +12,15 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+import random
 
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.orm import Session
 
 from src.backend.app.core.database import get_db
 from src.backend.app.core.auth_dependencies import get_current_user
-from src.backend.app.models.models import Movie, Recommendation, User
+from src.backend.app.models.models import Movie, Recommendation, User, Rating
 from src.backend.app.recommender.hybrid import EXPIRES_HOURS, recommender
 from src.backend.app.schemas.recommendations_schemas import (
     RecommendationResponse,
@@ -60,33 +61,44 @@ async def get_recommendations(
             .limit(top_n)
         ).scalars().all()
 
-        if cached:
-            logger.info(
-                f"Cache hit: {len(cached)} ajánlás user {user_id[:8]}... számára."
-            )
-            return await _build_response(cached, db, source="precomputed")
+        if len(cached) == top_n:
+            # Ellenőrzés: van-e már értékelt film a cache-ben?
+            user_ratings = db.execute(
+                select(Rating.movie_id).where(Rating.user_id == user_id)
+            ).scalars().all()
+            rated_ids = set(user_ratings)
+
+            if not any(r.movie_id in rated_ids for r in cached):
+                logger.info(f"Cache hit: {len(cached)} ajánlás user {user_id[:8]}...")
+                return await _build_response(cached, db, source="precomputed")
+            else:
+                logger.info(f"Cache érvénytelen (értékelt film szerepel benne), újragenerálás...")
+                # folytatódik a real-time ág
 
     # --- 2. Real-time generálás ---
     logger.info(f"Real-time ajánlás generálás: user {user_id[:8]}...")
 
+    top_n_multi = 3
+
     try:
-        results = recommender.recommend(user_id=user_id, db=db, top_n=top_n)
+        results = recommender.recommend(user_id=user_id, db=db, top_n=top_n*top_n_multi)
     except Exception as e:
         logger.error(f"Ajánlás generálás sikertelen: {e}", exc_info=True)
         # Fallback: üres lista helyett a leggyakrabban értékelt filmek
-        results = _popularity_fallback(db, top_n)
+        results = _popularity_fallback(db, top_n*top_n_multi)
 
     if not results:
         return RecommendationsListResponse(items=[], source="none", total=0)
 
+    results = random.sample(results, top_n)
+    results = sorted(results, key=lambda r: r[1], reverse=True)
+
     expires_at = now + timedelta(hours=EXPIRES_HOURS)
 
     # Régi lejárt ajánlások törlése
-    from sqlalchemy import delete
     db.execute(
         delete(Recommendation).where(
             Recommendation.user_id == current_user.id,
-            Recommendation.expires_at <= now,
         )
     )
 

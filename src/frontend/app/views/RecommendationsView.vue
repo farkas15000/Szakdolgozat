@@ -103,5 +103,5 @@ async function handleCardClick(rec) {
   router.push(`/movies/${rec.movie_id}`)
 }
 
-onMounted(() => loadRecommendations(true))
+onMounted(() => loadRecommendations(false))
 </script>
