@@ -21,7 +21,7 @@
                bg-gradient-to-br from-gray-100 to-gray-200 text-gray-400"
       >
         <span class="text-4xl mb-2">🎬</span>
-        <span class="text-xs text-center px-2 line-clamp-2">{{ posterUrl }}</span>
+        <span class="text-xs text-center px-2 line-clamp-2">{{ title }}</span>
       </div>
 
       <!-- Score badge -->
@@ -56,15 +56,25 @@
         </span>
       </div>
 
+      <!-- Ajánlás indoklása -->
+      <div
+        v-if="reasonLabel"
+        class="flex items-center gap-1 mt-1"
+      >
+        <span class="text-base leading-none">{{ reasonLabel.icon }}</span>
+        <span :class="['text-xs font-medium', reasonLabel.color]">
+          {{ reasonLabel.text }}
+        </span>
+      </div>
       <p v-if="algorithm" class="text-xs text-gray-300 mt-1">{{ algorithm }}</p>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 
-defineProps({
+const props = defineProps({
   movieId:     { type: Number,  required: true },
   title:       { type: String,  required: true },
   releaseYear: { type: Number,  default: null },
@@ -77,4 +87,14 @@ defineProps({
 defineEmits(['click'])
 
 const imgError = ref(false)
+
+const REASON_MAP = {
+  popularity:    { icon: '🔥', text: 'Népszerű filmek között',         color: 'text-orange-500' },
+  genre_based:   { icon: '🎭', text: 'Műfaji egyezés',                 color: 'text-green-600'  },
+  content_based: { icon: '🎯', text: 'Hasonló a kedvelt filmjeidhez',  color: 'text-blue-600'   },
+  hybrid:        { icon: '✨', text: 'Személyre szabott ajánlás',       color: 'text-purple-600' },
+  svd:           { icon: '✨', text: 'Személyre szabott ajánlás',       color: 'text-purple-600' },
+}
+
+const reasonLabel = computed(() => REASON_MAP[props.algorithm.split(":")[0]] ?? null)
 </script>
