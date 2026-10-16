@@ -11,3 +11,4 @@ numpy
 pandas
 httpx
 bcrypt>=4.0.0
+pytest
