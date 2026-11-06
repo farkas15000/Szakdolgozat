@@ -4,12 +4,12 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from src.backend.app.core.database import get_db
 from src.backend.app.core.auth_dependencies import get_current_user
-from src.backend.app.models.models import Movie, Rating, User
+from src.backend.app.models.models import Movie, Rating, Recommendation, User
 from src.backend.app.schemas.interactions_schemas import (
     PaginatedRatings,
     RatingCreate,
@@ -18,6 +18,21 @@ from src.backend.app.schemas.interactions_schemas import (
 )
 
 router = APIRouter(prefix="/ratings", tags=["ratings"])
+
+
+def _invalidate_recommendation_cache(db: Session, user_id) -> None:
+    """
+    Törli a felhasználó tárolt (cache-elt) ajánlásait.
+
+    Egy értékelés módosítása vagy törlése megváltoztatja a felhasználó
+    ízlésprofilját (pl. egy korábban kedvelt film már nem számít kedveltnek),
+    ezért a korábban eltárolt ajánlás elavult. Üres cache esetén a
+    GET /recommendations automatikusan friss, real-time generálást ad.
+
+    A törlés a hívó tranzakciójában történik (nincs külön commit), így az
+    értékelés módosítása és a cache ürítése együtt, atomikusan érvényesül.
+    """
+    db.execute(delete(Recommendation).where(Recommendation.user_id == user_id))
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +106,7 @@ def create_rating(
         rating=body.rating,
     )
     db.add(rating)
+    _invalidate_recommendation_cache(db, current_user.id)
     db.commit()
     db.refresh(rating)
     return rating
@@ -143,6 +159,7 @@ def update_rating(
         )
 
     rating.rating = body.rating
+    _invalidate_recommendation_cache(db, current_user.id)
     db.commit()
     db.refresh(rating)
     return rating
@@ -172,4 +189,5 @@ def delete_rating(
         )
 
     db.delete(rating)
+    _invalidate_recommendation_cache(db, current_user.id)
     db.commit()

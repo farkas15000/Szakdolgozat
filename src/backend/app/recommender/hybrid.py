@@ -199,7 +199,7 @@ class HybridRecommender:
             else:
                 reason = base_reason
 
-            results.append((mid, score, reason+f": SVD {svd_s:.2f}%, Content {content_s:.2f}%"))
+            results.append((mid, score, reason+f": SVD {round(svd_s*100)}%, Content {round(content_s*100)}%"))
 
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:top_n]
