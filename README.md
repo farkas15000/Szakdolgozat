@@ -1,4 +1,4 @@
-# Személyre szabott film ajánlórendszer
+# Személyre szabott film ajánlórendszer webalkalmazás
 
 > Webalkalmazás, amely valós idejű, személyre szabott tartalomajánlásokat nyújt felhasználóknak az érdeklődési körük és korábbi interakcióik alapján – hogy ne vesszetek el a tartalmak tengerében.
 
@@ -28,13 +28,14 @@
 
 A teljes termékdokumentáció a [`docs/`](./docs) mappában található ([index](./docs/00_index.md)):
 
-| Terület | Link |
-|---|---|
-| Termék scope, MVP, elfogadási kritériumok | [docs/01_product/scope_contract.md](./docs/01_product/scope_contract.md) |
-| Fő felhasználói folyamat (UX flow) | [docs/03_design/ux_flows.md](./docs/03_design/ux_flows.md) |
-| Teszt stratégia | [docs/04_quality/test_strategy.md](./docs/04_quality/test_strategy.md) |
-| Teszt riport (legutolsó futás) | [docs/04_quality/test_report.md](./docs/04_quality/test_report.md) |
-| Offline modell-kiértékelés útmutató | [EVALUATE_GUIDE.md](./EVALUATE_GUIDE.md) |
+| Terület | Link                                                                             |
+|---|----------------------------------------------------------------------------------|
+| Termék scope, MVP, elfogadási kritériumok | [docs/01_product/scope_contract.md](./docs/01_product/scope_contract.md)         |
+| Fő felhasználói folyamat (UX flow) | [docs/03_design/ux_flows.md](./docs/03_design/ux_flows.md)                       |
+| Teszt stratégia | [docs/04_quality/test_strategy.md](./docs/04_quality/test_strategy.md)           |
+| Teszt riport (legutolsó futás) | [docs/04_quality/test_report.md](./docs/04_quality/test_report.md)               |
+| Offline modell-kiértékelés útmutató | [EVALUATE_GUIDE.md](./EVALUATE_GUIDE.md)                                         |
+| Offline összehasonlítás | [docs/06_release/evaluation_results.md](./docs/06_release/evaluation_results.md) |
 
 ---
 

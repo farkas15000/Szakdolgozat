@@ -1,0 +1,27 @@
+services:
+  evaluate:
+    build: .
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      DB_HOST: db
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      SVD_MODEL_PATH: ${SVD_MODEL_PATH:-models/svd.pkl}
+      CONTENT_MODEL_PATH: ${CONTENT_MODEL_PATH:-models/content.pkl}
+    volumes:
+      - recommender_model:/var/lib/recommender_model/data
+    entrypoint: ["python", "-m", "src.backend.app.recommender.evaluate"]
+    command: >
+      --ratings-csv ./dataset/ml-latest-small/ratings.csv
+      --movies-csv  ./dataset/ml-latest-small/movies.csv
+      --genome-csv  ./dataset/ml-latest-small/genome-scores.csv
+      --candidate-pool-size 500
+      --k 20
+      --output /var/lib/recommender_model/data/eval_results.csv
+      --example-user-ids 116,26,235,91,176,100
+
+volumes:
+  postgres_data:
+  recommender_model:
