@@ -34,6 +34,13 @@ MIN_RATINGS_FOR_SVD = int(os.environ.get("MIN_RATINGS_FOR_SVD", "7"))
 DEFAULT_TOP_N = int(os.environ.get("RECOMMENDATION_TOP_N", "20"))
 CANDIDATE_POOL_SIZE = int(os.environ.get("CANDIDATE_POOL_SIZE", "500"))
 EXPIRES_HOURS = int(os.environ.get("EXPIRES_HOURS", "24"))
+LIKED_THRESHOLD = 4.0  # ennyi vagy magasabb értékelés számít "kedveltnek"
+
+# Aktív ajánlómód (GET /recommendations/profile)
+MODE_COLD_START = "cold_start"
+MODE_CONTENT    = "content_based"
+MODE_HYBRID     = "hybrid"
+MODE_SVD        = "svd"
 
 # Algoritmus → emberi olvasható indoklás (frontend i18n kulcs)
 ALGO_POPULARITY   = "popularity"      # 0 értékelés, nincs modell
@@ -79,6 +86,37 @@ class HybridRecommender:
                     f"Content modell nem található: {content_path}."
                 )
 
+    def knows_user(self, user_id: str) -> bool:
+        """Szerepel-e a felhasználó a betanított SVD modellben?"""
+        if self._svd is None:
+            return False
+        try:
+            return str(user_id) in self._svd._dataset.uid_map
+        except AttributeError:
+            return False
+
+    def active_mode(self, user_id: str, n_ratings: int, n_liked: int) -> str:
+        """
+        Melyik módban futna most a motor ennek a felhasználónak.
+        Ugyanazt a feltételrendszert tükrözi, mint a recommend():
+        SVD csak akkor, ha a modell be van töltve, elég értékelés van ÉS a modell
+        ismeri a felhasználót; content csak akkor, ha van kedvelt film.
+        """
+        self._load_models()
+        use_svd = (
+            self._svd is not None
+            and n_ratings >= MIN_RATINGS_FOR_SVD
+            and self.knows_user(user_id)
+        )
+        use_content = self._content is not None and n_liked > 0
+        if use_svd and use_content:
+            return MODE_HYBRID
+        if use_svd:
+            return MODE_SVD
+        if use_content:
+            return MODE_CONTENT
+        return MODE_COLD_START
+
     def recommend(
         self,
         user_id: str,
@@ -107,7 +145,7 @@ class HybridRecommender:
         ).fetchall()
 
         rated_movie_ids = {r[0] for r in user_ratings}
-        liked_movie_ids = [r[0] for r in user_ratings if r[1] >= 4.0]
+        liked_movie_ids = [r[0] for r in user_ratings if r[1] >= LIKED_THRESHOLD]
         n_ratings = len(user_ratings)
 
         # --- Jelölt filmek: a leggyakrabban értékelt, még nem látott filmek ---

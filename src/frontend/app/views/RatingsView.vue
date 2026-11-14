@@ -27,12 +27,24 @@
             :to="`/movies/${r.movie_id}`"
             class="text-sm font-medium hover:text-primary-600 transition-colors"
           >
-            {{movies.find(m => m.movie_id === r.movie_id).title}}<br>
-            {{movies.find(m => m.movie_id === r.movie_id).release_year}}
+            {{ movieOf(r.movie_id)?.title ?? `Film #${r.movie_id}` }}<br>
+            {{ movieOf(r.movie_id)?.release_year }}
           </RouterLink>
 
           <div class="flex items-center gap-3">
-            <StarRating :model-value="r.rating" readonly />
+            <div class="text-right">
+              <StarRating
+                :model-value="r.rating"
+                @update:model-value="(v) => updateRating(r, v)"
+              />
+              <p
+                v-if="rowMsg[r.movie_id]"
+                class="text-xs mt-1"
+                :class="rowMsg[r.movie_id].error ? 'text-red-500' : 'text-green-600'"
+              >
+                {{ rowMsg[r.movie_id].text }}
+              </p>
+            </div>
             <span class="text-sm text-gray-500">{{ r.rating }}/5</span>
             <button
               class="text-xs text-red-400 hover:text-red-600 transition-colors"
@@ -81,6 +93,13 @@ const loading    = ref(false)
 const page       = ref(1)
 const totalPages = ref(1)
 const total      = ref(0)
+const rowMsg     = ref({})      // movie_id -> { text, error }
+const saving     = new Set()    // éppen mentés alatt álló movie_id-k
+const msgTimers  = {}
+
+function movieOf(movieId) {
+  return movies.value.find((m) => m.movie_id === movieId)
+}
 
 // ---------------------------------------------------------------------------
 // URL → state
@@ -131,6 +150,33 @@ async function loadRatings() {
 
   } finally {
     loading.value = false
+  }
+}
+
+function showRowMsg(movieId, text, error = false) {
+  rowMsg.value = { ...rowMsg.value, [movieId]: { text, error } }
+  clearTimeout(msgTimers[movieId])
+  msgTimers[movieId] = setTimeout(() => {
+    const { [movieId]: _removed, ...rest } = rowMsg.value
+    rowMsg.value = rest
+  }, 2500)
+}
+
+// Meglévő értékelés helybeni módosítása (optimista frissítés, hiba esetén visszaállítás)
+async function updateRating(r, value) {
+  if (value === r.rating || saving.has(r.movie_id)) return
+  const previous = r.rating
+  saving.add(r.movie_id)
+  r.rating = value
+  try {
+    const { data } = await ratingsApi.update(r.movie_id, { rating: value })
+    r.rating = data.rating
+    showRowMsg(r.movie_id, '✓ Elmentve')
+  } catch {
+    r.rating = previous
+    showRowMsg(r.movie_id, 'Hiba történt, az érték nem változott', true)
+  } finally {
+    saving.delete(r.movie_id)
   }
 }
 

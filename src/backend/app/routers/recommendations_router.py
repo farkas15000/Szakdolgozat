@@ -15,13 +15,21 @@ from datetime import datetime, timedelta, timezone
 import random
 
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import select, delete
+from pydantic import BaseModel
+from sqlalchemy import select, delete, func
 from sqlalchemy.orm import Session
 
 from src.backend.app.core.database import get_db
 from src.backend.app.core.auth_dependencies import get_current_user
-from src.backend.app.models.models import Movie, Recommendation, User, Rating
-from src.backend.app.recommender.hybrid import EXPIRES_HOURS, recommender
+from src.backend.app.models.models import (
+    Genre, Movie, MovieGenre, Recommendation, User, Rating,
+)
+from src.backend.app.recommender.hybrid import (
+    EXPIRES_HOURS,
+    LIKED_THRESHOLD,
+    MIN_RATINGS_FOR_SVD,
+    recommender,
+)
 from src.backend.app.schemas.recommendations_schemas import (
     RecommendationResponse,
     RecommendationsListResponse,
@@ -123,6 +131,62 @@ async def get_recommendations(
         db.refresh(r)
 
     return await _build_response(new_recs, db, source="realtime")
+
+
+# ---------------------------------------------------------------------------
+# GET /recommendations/profile
+# Ízlésprofil és aktív ajánlómód – a frontend információs sávjához
+# ---------------------------------------------------------------------------
+
+class ProfileGenre(BaseModel):
+    name: str
+    count: int  # ennyi kedvelt film tartozik ebbe a műfajba
+
+
+class TasteProfileResponse(BaseModel):
+    rated_count: int
+    liked_count: int
+    mode: str  # cold_start | content_based | hybrid | svd
+    min_ratings_for_svd: int
+    known_by_svd: bool
+    top_genres: list[ProfileGenre]
+
+
+@router.get("/profile", response_model=TasteProfileResponse)
+def get_taste_profile(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    top_genres: int = Query(default=3, ge=1, le=10),
+) -> TasteProfileResponse:
+    ratings = db.execute(
+        select(Rating.rating).where(Rating.user_id == current_user.id)
+    ).scalars().all()
+    rated_count = len(ratings)
+    liked_count = sum(1 for r in ratings if r >= LIKED_THRESHOLD)
+
+    genre_rows = db.execute(
+        select(Genre.name, func.count().label("cnt"))
+        .select_from(Rating)
+        .join(MovieGenre, MovieGenre.movie_id == Rating.movie_id)
+        .join(Genre, Genre.genre_id == MovieGenre.genre_id)
+        .where(
+            Rating.user_id == current_user.id,
+            Rating.rating >= LIKED_THRESHOLD,
+        )
+        .group_by(Genre.name)
+        .order_by(func.count().desc(), Genre.name)
+        .limit(top_genres)
+    ).all()
+
+    user_id = str(current_user.id)
+    return TasteProfileResponse(
+        rated_count=rated_count,
+        liked_count=liked_count,
+        mode=recommender.active_mode(user_id, rated_count, liked_count),
+        min_ratings_for_svd=MIN_RATINGS_FOR_SVD,
+        known_by_svd=recommender.knows_user(user_id),
+        top_genres=[ProfileGenre(name=n, count=c) for n, c in genre_rows],
+    )
 
 
 # ---------------------------------------------------------------------------

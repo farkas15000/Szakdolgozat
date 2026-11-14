@@ -44,6 +44,7 @@ export const interactionsApi = {
 export const recommendationsApi = {
   list: (params) => client.get('/recommendations', { params }),
   click: (id) => client.post(`/recommendations/${id}/click`),
+  profile: () => client.get('/recommendations/profile'),
 }
 
 // ---------------------------------------------------------------------------

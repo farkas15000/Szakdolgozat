@@ -8,6 +8,8 @@
       </button>
     </div>
 
+    <TasteProfileBar />
+
     <!-- Betöltés -->
     <div v-if="loading" class="grid grid-cols-2 md:grid-cols-4 gap-4">
       <div
@@ -66,6 +68,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { recommendationsApi } from '@/api'
 import MovieCard from '@/components/MovieCard.vue'
+import TasteProfileBar from '@/components/TasteProfileBar.vue'
 
 const router          = useRouter()
 const recommendations = ref([])
