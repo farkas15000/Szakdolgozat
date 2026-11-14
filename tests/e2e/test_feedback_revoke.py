@@ -120,7 +120,7 @@ class TestRevokeLikedRating:
         assert first["items"], "A baseline ajánlás nem lehet üres"
         S.baseline_ids = [it["movie_id"] for it in first["items"]]
         S.baseline_scores = {
-            it["movie_id"]: it["score"] for it in first["items"] if it["algorithm"] == "content_based"
+            it["movie_id"]: it["score"] for it in first["items"] if it["algorithm"].split(":")[0] == "content_based"
         }
 
         # a baseline ajánlás cache-be került: a második lekérés ugyanazt adja
@@ -159,7 +159,7 @@ class TestRevokeLikedRating:
 
         # a profil tényleg megváltozott: ugyanazon filmek content-based pontszáma eltér
         after_scores = {
-            it["movie_id"]: it["score"] for it in after["items"] if it["algorithm"] == "content_based"
+            it["movie_id"]: it["score"] for it in after["items"] if it["algorithm"].split(":")[0] == "content_based"
         }
         common = set(S.baseline_scores) & set(after_scores)
         if common:
@@ -201,4 +201,4 @@ class TestRevokeLikedRating:
         assert after["source"] == "realtime"
         assert after["items"], "Kedvelt film nélkül is érthető, nem üres tartalékajánlás kell"
         assert not ({it["movie_id"] for it in after["items"]} & _rated_ids(client, headers))
-        assert all(it["algorithm"] for it in after["items"]), "Minden elemnek legyen algoritmusjelölése"
+        assert all(it["algorithm"].split(":")[0] for it in after["items"]), "Minden elemnek legyen algoritmusjelölése"
