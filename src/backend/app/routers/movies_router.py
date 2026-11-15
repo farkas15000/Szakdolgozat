@@ -113,6 +113,62 @@ def list_genres(db: Session = Depends(get_db)) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# GET /movies/batch?ids=1,2,3
+# Több film alapadata egyetlen lekérdezésben (pl. az Értékeléseim nézethez).
+# A /{movie_id} útvonal ELŐTT kell szerepelnie, különben a "batch" egész
+# számként értelmeződne és 422-t adna.
+# ---------------------------------------------------------------------------
+
+@router.get("/batch", response_model=list[MovieSummary])
+async def get_movies_batch(
+    ids: Annotated[
+        str,
+        Query(description="Vesszővel elválasztott movie_id lista, pl. 1,2,3 (max. 100)"),
+    ],
+    include_posters: Annotated[
+        bool, Query(description="Ha false, kihagyja a TMDB poszter-lekérést (gyorsabb).")
+    ] = False,
+    db: Session = Depends(get_db),
+) -> list[MovieSummary]:
+    try:
+        movie_ids = list(dict.fromkeys(int(x) for x in ids.split(",") if x.strip()))
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Az ids paraméter csak egész számokat tartalmazhat, vesszővel elválasztva.",
+        )
+
+    if not movie_ids:
+        return []
+
+    movies = db.execute(
+        select(Movie)
+        .options(selectinload(Movie.genres))
+        .where(Movie.movie_id.in_(movie_ids))
+    ).scalars().all()
+
+    poster_map: dict[str, str | None] = {}
+    if include_posters:
+        tmdb_ids = [m.tmdb_id for m in movies if m.tmdb_id]
+        if tmdb_ids:
+            poster_map = await get_poster_urls_bulk(tmdb_ids)
+
+    by_id = {m.movie_id: m for m in movies}
+    # a kért sorrendben adjuk vissza; a nem létező id-k kimaradnak
+    return [
+        MovieSummary(
+            movie_id=m.movie_id,
+            title=m.title,
+            release_year=m.release_year,
+            genres=[g.name for g in m.genres],
+            poster_url=poster_map.get(m.tmdb_id) if m.tmdb_id else None,
+        )
+        for mid in movie_ids
+        if (m := by_id.get(mid)) is not None
+    ]
+
+
+# ---------------------------------------------------------------------------
 # GET /movies/{movie_id}
 # ---------------------------------------------------------------------------
 

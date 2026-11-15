@@ -18,6 +18,7 @@ export const moviesApi = {
   list: (params) => client.get('/movies', { params }),
   get: (movieId) => client.get(`/movies/${movieId}`),
   genres: () => client.get('/movies/genres'),
+  batch: (ids) => client.get('/movies/batch', { params: { ids: ids.join(',') } }),
 }
 
 // ---------------------------------------------------------------------------

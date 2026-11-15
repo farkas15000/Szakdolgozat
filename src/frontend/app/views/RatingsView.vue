@@ -143,9 +143,15 @@ async function loadRatings() {
     total.value      = data.total
     totalPages.value = data.pages
 
-    for (const rating of ratings.value){
-      const { data } = await moviesApi.get(rating.movie_id)
-      movies.value.push(data)
+    movies.value = []
+    const ids = ratings.value.map((r) => r.movie_id)
+    if (ids.length) {
+      try {
+        const { data: batch } = await moviesApi.batch(ids)
+        movies.value = batch
+      } catch {
+        movies.value = []
+      }
     }
 
   } finally {
