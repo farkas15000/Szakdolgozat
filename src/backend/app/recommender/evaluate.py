@@ -14,6 +14,13 @@ Használat:
     python -m src.backend.app.recommender.evaluate --example-user-ids 5,23,101
     python -m src.backend.app.recommender.evaluate --example-users-count 3
 
+    Érzékenységi vizsgálat (SVD hiperparaméterek, hibrid alfa, több seed):
+    python -m src.backend.app.recommender.evaluate --sweep --k 10 \
+        --seeds 42,43,44 --split-mode random \
+        --svd-k-list 100,50,32 --svd-iter-list 20,50,100 \
+        --alphas 0.0,0.1,0.2,0.4,0.6,0.8,1.0 \
+        --sweep-output-prefix /var/lib/recommender_model/data/sweep_random
+
 A script NEM használja az élő DB-t a train/test splithez –
 a MovieLens ratings.csv-t közvetlenül olvassa, hogy az eredmény
 reprodukálható és az online DB-től független legyen.
@@ -27,7 +34,7 @@ import math
 import os
 import pickle
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +53,13 @@ DEFAULT_GENOME_SCORES_CSV = os.environ.get("GENOME_SCORES_CSV", "dataset/ml-late
 DEFAULT_MOVIES_CSV = os.environ.get("MOVIES_CSV", "dataset/ml-latest-small/movies.csv")
 SVD_MODEL_PATH = os.environ.get("SVD_MODEL_PATH", "models/svd.pkl")
 CONTENT_MODEL_PATH = os.environ.get("CONTENT_MODEL_PATH", "models/content.pkl")
+
+# Az eddigi (hangolatlan) SVD-beállítás – ez az alapérték mindenhol
+SVD_DEFAULT_K = 100
+SVD_DEFAULT_ITER = 20
+SVD_DEFAULT_LR = 0.01
+SVD_DEFAULT_LAMBDA = 0.02
+HYBRID_MIN_RATINGS_FOR_SVD = 5
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +140,8 @@ def train_test_split(
     rendezve a MovieLens CSV-ben (timestamp alapján), ezért az egyszerű
     sorrend is helyes.
 
+    FIGYELEM: ez a felosztás determinisztikus, a seed-től NEM függ.
+
     Csak azokat a usereket vonjuk be, akiknek legalább min_ratings értékelésük van.
     """
     random.seed(seed)
@@ -148,6 +164,50 @@ def train_test_split(
         f"Split kész: {len(train)} train értékelés, {len(test)} teszt értékelés"
     )
     return train, test
+
+
+def random_user_split(
+    ratings: list[tuple[str, int, float]],
+    test_ratio: float = 0.2,
+    min_ratings: int = 5,
+    seed: int = 42,
+) -> tuple[list, list]:
+    """
+    Seed-függő felosztás: minden (>= min_ratings értékelésű) usernél
+    véletlenszerűen kiválasztott test_ratio arányú értékelés kerül a tesztbe.
+    Ezzel a felosztás szórása is mérhető (a temporal split nem ad szórást).
+    """
+    rng = random.Random(seed)
+    user_ratings: dict[str, list] = defaultdict(list)
+    for uid, mid, r in ratings:
+        user_ratings[uid].append((uid, mid, r))
+
+    train, test = [], []
+    for uid, user_rows in user_ratings.items():
+        if len(user_rows) < min_ratings:
+            train.extend(user_rows)
+            continue
+        n_test = max(1, int(len(user_rows) * test_ratio))
+        test_idx = set(rng.sample(range(len(user_rows)), n_test))
+        for i, row in enumerate(user_rows):
+            (test if i in test_idx else train).append(row)
+
+    logger.info(
+        f"Random split (seed={seed}): {len(train)} train, {len(test)} teszt értékelés"
+    )
+    return train, test
+
+
+def make_split(
+    ratings: list[tuple[str, int, float]],
+    split_mode: str,
+    test_ratio: float,
+    min_ratings: int,
+    seed: int,
+) -> tuple[list, list]:
+    if split_mode == "random":
+        return random_user_split(ratings, test_ratio, min_ratings, seed)
+    return train_test_split(ratings, test_ratio, min_ratings, seed)
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +296,16 @@ def mae(predictions: list[tuple[float, float]]) -> float:
 # Modellek
 # ---------------------------------------------------------------------------
 
+def _minmax(scored: list[tuple[int, float]]) -> dict[int, float]:
+    """Min-max normalizálás [0,1]-re; üres bemenetre üres dict."""
+    if not scored:
+        return {}
+    vals = [s for _, s in scored]
+    mn, mx = min(vals), max(vals)
+    rng = mx - mn or 1.0
+    return {mid: (s - mn) / rng for mid, s in scored}
+
+
 class PopularityRecommender:
     """A train halmazban legtöbbször értékelt filmeket ajánlja."""
 
@@ -246,7 +316,8 @@ class PopularityRecommender:
         self._ranking = sorted(counts, key=counts.get, reverse=True)  # type: ignore
 
     def recommend(self, rated_ids: set[int], candidates: list[int], top_n: int) -> list[int]:
-        filtered = [mid for mid in self._ranking if mid in set(candidates) and mid not in rated_ids]
+        cand_set = set(candidates)
+        filtered = [mid for mid in self._ranking if mid in cand_set and mid not in rated_ids]
         return filtered[:top_n]
 
 
@@ -288,13 +359,13 @@ class ContentBasedOffline:
             )
         self._idx = {mid: i for i, mid in enumerate(self._movie_ids)}
 
-    def recommend(
+    def score_candidates(
         self,
         liked_ids: list[int],
         rated_ids: set[int],
         candidates: list[int],
-        top_n: int,
-    ) -> list[int]:
+    ) -> list[tuple[int, float]]:
+        """Pontszám szerint csökkenően rendezett (movie_id, score) lista."""
         if not liked_ids or self._matrix is None:
             return []
         liked_indices = [self._idx[mid] for mid in liked_ids if mid in self._idx]
@@ -306,8 +377,16 @@ class ContentBasedOffline:
             return []
         vecs = self._matrix[[i for _, i in cand]]
         scores = vecs @ profile
-        ranked = sorted(zip([mid for mid, _ in cand], scores.tolist()), key=lambda x: x[1], reverse=True)
-        return [mid for mid, _ in ranked[:top_n]]
+        return sorted(zip([mid for mid, _ in cand], scores.tolist()), key=lambda x: x[1], reverse=True)
+
+    def recommend(
+        self,
+        liked_ids: list[int],
+        rated_ids: set[int],
+        candidates: list[int],
+        top_n: int,
+    ) -> list[int]:
+        return [mid for mid, _ in self.score_candidates(liked_ids, rated_ids, candidates)[:top_n]]
 
 
 class SVDOffline:
@@ -317,19 +396,32 @@ class SVDOffline:
     Stratégia (sorrendben):
     1. Ha létezik svd.pkl ÉS a pkl-beli uid_map tartalmazza a CSV userId-ket
        (azaz MovieLens userId-kal lett tanítva), akkor a meglévő modellt
-       tölti be.
+       tölti be (csak ha allow_pkl=True).
     2. Egyébként a train halmazból tanít újra cornac SVD-t – ez biztosítja,
        hogy pontosan azok az user/item ID-k legyenek a modellben, amelyek
        a kiértékelési splitben is szerepelnek.
 
-    A pkl-alapú betöltés csak akkor működik helyesen, ha a pkl-ben lévő
-    uid_map kulcsai egyeznek a MovieLens CSV userId értékeivel (str formában).
-    Ha a pkl a DB szekvenciális ID-ival tanult (1, 2, 3, ... != MovieLens
-    userId), a modell minden usernél 0 találatot ad, ezért inkább újratanítunk.
+    A sweep módban allow_pkl=False: minden konfiguráció mindig a train
+    halmazból, a megadott hiperparaméterekkel tanul.
     """
 
-    def __init__(self, model_path: str = SVD_MODEL_PATH) -> None:
+    def __init__(
+        self,
+        model_path: str = SVD_MODEL_PATH,
+        k: int = SVD_DEFAULT_K,
+        max_iter: int = SVD_DEFAULT_ITER,
+        learning_rate: float = SVD_DEFAULT_LR,
+        lambda_reg: float = SVD_DEFAULT_LAMBDA,
+        seed: int = 42,
+        allow_pkl: bool = True,
+    ) -> None:
         self._model_path = model_path
+        self._k = k
+        self._max_iter = max_iter
+        self._lr = learning_rate
+        self._lambda = lambda_reg
+        self._seed = seed
+        self._allow_pkl = allow_pkl
         self._model = None
         self._uid_map: dict = {}
         self._iid_map: dict = {}
@@ -337,7 +429,7 @@ class SVDOffline:
     def fit(self, train: list[tuple[str, int, float]]) -> None:
         # --- 1. lépés: meglévő pkl betöltési kísérlet ---
         p = Path(self._model_path)
-        if p.exists():
+        if self._allow_pkl and p.exists():
             try:
                 with open(p, "rb") as f:
                     data = pickle.load(f)
@@ -345,7 +437,7 @@ class SVDOffline:
                 dataset = data["dataset"]
                 uid_map = dataset.uid_map
                 iid_map = dataset.iid_map
-                # Ellenőrzés: a train userId-k legalább 10%-a megvan-e a pkl-ben?
+                # Ellenőrzés: a train userId-k legalább 50%-a megvan-e a pkl-ben?
                 sample_uids = list({uid for uid, _, _ in train[:200]})
                 matched = sum(1 for uid in sample_uids if str(uid) in uid_map)
                 match_ratio = matched / len(sample_uids) if sample_uids else 0.0
@@ -372,7 +464,7 @@ class SVDOffline:
     def _fit_from_train(self, train: list[tuple[str, int, float]]) -> None:
         """Cornac SVD tanítása a megadott train adaton."""
         try:
-            import cornac
+            import cornac  # noqa: F401
             from cornac.data import Dataset
             from cornac.models import SVD as CornacSVD
         except ImportError:
@@ -380,24 +472,32 @@ class SVDOffline:
             return
 
         uir = [(str(uid), str(mid), float(r)) for uid, mid, r in train]
-        dataset = Dataset.from_uir(uir, seed=42)
-        model = CornacSVD(k=100, max_iter=20, learning_rate=0.01, lambda_reg=0.02, seed=42, verbose=False)
+        dataset = Dataset.from_uir(uir, seed=self._seed)
+        model = CornacSVD(
+            k=self._k,
+            max_iter=self._max_iter,
+            learning_rate=self._lr,
+            lambda_reg=self._lambda,
+            seed=self._seed,
+            verbose=False,
+        )
         model.fit(dataset)
         self._model = model
         self._uid_map = dataset.uid_map
         self._iid_map = dataset.iid_map
         logger.info(
-            f"SVD újratanítva: {len(self._uid_map)} user, {len(self._iid_map)} item "
-            f"(train split alapján)"
+            f"SVD újratanítva (k={self._k}, max_iter={self._max_iter}, lr={self._lr}, "
+            f"λ={self._lambda}, seed={self._seed}): {len(self._uid_map)} user, "
+            f"{len(self._iid_map)} item"
         )
 
-    def recommend(
+    def score_candidates(
         self,
         user_id: str,
         rated_ids: set[int],
         candidates: list[int],
-        top_n: int,
-    ) -> list[int]:
+    ) -> list[tuple[int, float]]:
+        """Pontszám szerint csökkenően rendezett (movie_id, score) lista."""
         if self._model is None or str(user_id) not in self._uid_map:
             return []
         uid_idx = self._uid_map[str(user_id)]
@@ -411,7 +511,16 @@ class SVDOffline:
             score = self._model.score(uid_idx, self._iid_map[movie_str])
             preds.append((mid, float(score)))
         preds.sort(key=lambda x: x[1], reverse=True)
-        return [mid for mid, _ in preds[:top_n]]
+        return preds
+
+    def recommend(
+        self,
+        user_id: str,
+        rated_ids: set[int],
+        candidates: list[int],
+        top_n: int,
+    ) -> list[int]:
+        return [mid for mid, _ in self.score_candidates(user_id, rated_ids, candidates)[:top_n]]
 
     def predict_rating(self, user_id: str, movie_id: int) -> float | None:
         if self._model is None or str(user_id) not in self._uid_map:
@@ -420,6 +529,29 @@ class SVDOffline:
         if movie_str not in self._iid_map:
             return None
         return float(self._model.score(self._uid_map[str(user_id)], self._iid_map[movie_str]))
+
+
+def hybrid_combine(
+    svd_map: dict[int, float],
+    content_map: dict[int, float],
+    rated_ids: set[int],
+    alpha: float,
+    top_n: int,
+) -> list[int]:
+    """
+    Lineáris kombináció: alpha * SVD + (1 - alpha) * Content.
+    FIGYELEM: az alpha az SVD súlya (alpha=0 → tiszta Content, alpha=1 → tiszta SVD).
+    """
+    if not svd_map and not content_map:
+        return []
+    ids = list(content_map.keys()) + [m for m in svd_map if m not in content_map]
+    combined = []
+    for mid in ids:
+        if mid in rated_ids:
+            continue
+        combined.append((mid, alpha * svd_map.get(mid, 0.0) + (1.0 - alpha) * content_map.get(mid, 0.0)))
+    combined.sort(key=lambda x: x[1], reverse=True)
+    return [mid for mid, _ in combined[:top_n]]
 
 
 class HybridOffline:
@@ -441,55 +573,16 @@ class HybridOffline:
         candidates: list[int],
         top_n: int,
         n_ratings: int,
-        min_ratings_for_svd: int = 5,
+        min_ratings_for_svd: int = HYBRID_MIN_RATINGS_FOR_SVD,
     ) -> list[int]:
-        use_svd = n_ratings >= min_ratings_for_svd
-
-        svd_results = self._svd.recommend(user_id, rated_ids, candidates, len(candidates)) if use_svd else []
-        if use_svd and not svd_results:
-            use_svd = False
-
-        content_results = self._content.recommend(liked_ids, rated_ids, candidates, len(candidates))
-
-        if not svd_results and not content_results:
-            return []
-
-        svd_map: dict[int, float] = {}
-        if svd_results:
-            scores = [s for s in [self._svd.predict_rating(user_id, mid) for mid in [r for r in svd_results]] if s is not None]
-            if scores:
-                mn, mx = min(scores), max(scores)
-                rng = mx - mn or 1.0
-                svd_map = {mid: (self._svd.predict_rating(user_id, mid) - mn) / rng  # type: ignore
-                           for mid in svd_results
-                           if self._svd.predict_rating(user_id, mid) is not None}
-
-        content_scores_raw = []
-        if content_results and self._content._matrix is not None:
-            liked_indices = [self._content._idx[mid] for mid in liked_ids if mid in self._content._idx]
-            if liked_indices:
-                profile = self._content._matrix[liked_indices].mean(axis=0)
-                for mid in content_results:
-                    if mid in self._content._idx:
-                        content_scores_raw.append((mid, float(self._content._matrix[self._content._idx[mid]] @ profile)))
-        c_scores = [s for _, s in content_scores_raw]
-        if c_scores:
-            c_min, c_max = min(c_scores), max(c_scores)
-            c_rng = c_max - c_min or 1.0
-            content_map = {mid: (s - c_min) / c_rng for mid, s in content_scores_raw}
-        else:
-            content_map = {}
-
+        svd_scored = (
+            self._svd.score_candidates(user_id, rated_ids, candidates)
+            if n_ratings >= min_ratings_for_svd else []
+        )
+        use_svd = bool(svd_scored)
+        content_scored = self._content.score_candidates(liked_ids, rated_ids, candidates)
         alpha = self._alpha if use_svd else 0.0
-        all_candidates = set(svd_results) | set(content_results)
-        combined = []
-        for mid in all_candidates:
-            if mid in rated_ids:
-                continue
-            score = alpha * svd_map.get(mid, 0.0) + (1.0 - alpha) * content_map.get(mid, 0.0)
-            combined.append((mid, score))
-        combined.sort(key=lambda x: x[1], reverse=True)
-        return [mid for mid, _ in combined[:top_n]]
+        return hybrid_combine(_minmax(svd_scored), _minmax(content_scored), rated_ids, alpha, top_n)
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +657,224 @@ def evaluate_model(
         result["MAE"] = round(mae(rmse_preds), 4)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Érzékenységi vizsgálat (sweep): SVD hiperparaméterek × hibrid alfa × seedek
+# ---------------------------------------------------------------------------
+
+def _parse_int_list(s: str) -> list[int]:
+    return [int(x) for x in s.split(",") if x.strip()]
+
+
+def _parse_float_list(s: str) -> list[float]:
+    return [float(x) for x in s.split(",") if x.strip()]
+
+
+def _mean_std(values: list[float]) -> tuple[float, float]:
+    vals = [v for v in values if v is not None and not math.isnan(v)]
+    if not vals:
+        return float("nan"), float("nan")
+    mean = sum(vals) / len(vals)
+    std = math.sqrt(sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) if len(vals) > 1 else 0.0
+    return mean, std
+
+
+def _config_sort_key(model: str, config: str):
+    order = {"Popularity": 0, "Content-based": 1, "SVD": 2, "Hybrid": 3}
+    return (order.get(model, 9), config)
+
+
+def run_sweep(args, ratings, genres_map, genome_map) -> None:
+    import csv
+
+    k = args.k
+    seeds = _parse_int_list(args.seeds)
+    k_list = _parse_int_list(args.svd_k_list)
+    iter_list = _parse_int_list(args.svd_iter_list)
+    alphas = _parse_float_list(args.alphas)
+
+    if args.split_mode == "temporal":
+        logger.warning(
+            "split-mode=temporal: a felosztás determinisztikus, a seed csak az SVD "
+            "inicializálást változtatja (Popularity/Content szórása 0 lesz). "
+            "A felosztás szórásához használd a --split-mode random módot."
+        )
+
+    configs = [(kk, it) for kk in k_list for it in iter_list]
+    logger.info(
+        f"Sweep: seedek={seeds}, split={args.split_mode}, SVD rács k×iter={configs}, alfák={alphas}"
+    )
+
+    raw_rows: list[dict] = []
+
+    for seed in seeds:
+        logger.info(f"===== Seed {seed} =====")
+        train, test = make_split(ratings, args.split_mode, args.test_ratio, args.min_ratings, seed)
+
+        train_rated: dict[str, set[int]] = defaultdict(set)
+        train_liked: dict[str, list[int]] = defaultdict(list)
+        train_n: dict[str, int] = defaultdict(int)
+        for uid, mid, r in train:
+            train_rated[uid].add(mid)
+            train_n[uid] += 1
+            if r >= 4.0:
+                train_liked[uid].append(mid)
+        user_test: dict[str, list[tuple[int, float]]] = defaultdict(list)
+        for uid, mid, r in test:
+            user_test[uid].append((mid, r))
+
+        movie_counts = Counter(mid for _, mid, _ in train)
+        candidate_pool = [mid for mid, _ in movie_counts.most_common(args.candidate_pool_size)]
+
+        popularity = PopularityRecommender()
+        popularity.fit(train)
+        content = ContentBasedOffline(genres_map, genome_map)
+        content.fit(train)
+
+        # Felhasználónkénti előszámítás (egyszer; minden konfiguráció újrahasznosítja)
+        users = []
+        for uid, items in user_test.items():
+            relevant = {mid for mid, r in items if r >= 4.0}
+            if not relevant:
+                continue
+            rated = train_rated.get(uid, set())
+            liked = train_liked.get(uid, [])
+            candidates = [mid for mid in candidate_pool if mid not in rated]
+            content_scored = content.score_candidates(liked, rated, candidates)
+            users.append({
+                "uid": uid, "items": items, "relevant": relevant, "rated": rated,
+                "n_rat": train_n.get(uid, 0), "candidates": candidates,
+                "content_scored": content_scored, "content_map": _minmax(content_scored),
+            })
+        logger.info(f"Kiértékelt felhasználók: {len(users)}")
+
+        acc: dict[tuple[str, str], dict] = defaultdict(lambda: {"P": [], "R": [], "N": [], "pairs": []})
+
+        def record(key, recs, relevant):
+            a = acc[key]
+            a["P"].append(precision_at_k(recs, relevant, k))
+            a["R"].append(recall_at_k(recs, relevant, k))
+            a["N"].append(ndcg_at_k(recs, relevant, k))
+
+        # Baseline-ok
+        for u in users:
+            record(("Popularity", "-"), popularity.recommend(u["rated"], u["candidates"], k), u["relevant"])
+            record(("Content-based", "-"), [m for m, _ in u["content_scored"][:k]], u["relevant"])
+
+        # SVD rács + hibrid alfa-sweep (minden SVD-konfigurációra)
+        for kk, it in configs:
+            cfg = f"k={kk},iter={it}"
+            svd = SVDOffline(
+                k=kk, max_iter=it, learning_rate=args.svd_lr, lambda_reg=args.svd_lambda,
+                seed=seed, allow_pkl=False,
+            )
+            svd.fit(train)
+            if svd._model is None:
+                logger.error("SVD nem tanítható (cornac hiányzik?) – a konfiguráció kimarad.")
+                continue
+            for u in users:
+                svd_scored = svd.score_candidates(u["uid"], u["rated"], u["candidates"])
+                record(("SVD", cfg), [m for m, _ in svd_scored[:k]], u["relevant"])
+                for m, actual in u["items"]:
+                    pred = svd.predict_rating(u["uid"], m)
+                    if pred is not None:
+                        acc[("SVD", cfg)]["pairs"].append((pred, actual))
+
+                use_svd = u["n_rat"] >= HYBRID_MIN_RATINGS_FOR_SVD and bool(svd_scored)
+                svd_map = _minmax(svd_scored) if use_svd else {}
+                for a in alphas:
+                    eff = a if use_svd else 0.0
+                    recs = hybrid_combine(svd_map, u["content_map"], u["rated"], eff, k)
+                    record(("Hybrid", f"{cfg},alpha={a:g}"), recs, u["relevant"])
+            del svd
+
+        for (model, cfg), a in acc.items():
+            row = {
+                "seed": seed, "model": model, "config": cfg, "users": len(a["P"]),
+                f"Precision@{k}": sum(a["P"]) / len(a["P"]),
+                f"Recall@{k}": sum(a["R"]) / len(a["R"]),
+                f"NDCG@{k}": sum(a["N"]) / len(a["N"]),
+                "RMSE": rmse(a["pairs"]) if a["pairs"] else float("nan"),
+                "MAE": mae(a["pairs"]) if a["pairs"] else float("nan"),
+            }
+            raw_rows.append(row)
+        logger.info(f"Seed {seed} kész.")
+
+    # --- Aggregálás seedek között ---
+    metric_cols = [f"Precision@{k}", f"Recall@{k}", f"NDCG@{k}", "RMSE", "MAE"]
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for r in raw_rows:
+        groups[(r["model"], r["config"])].append(r)
+
+    summary = []
+    for (model, cfg), rs in sorted(groups.items(), key=lambda kv: _config_sort_key(*kv[0])):
+        row = {"model": model, "config": cfg, "n_seeds": len(rs),
+               "users_mean": round(sum(r["users"] for r in rs) / len(rs), 1)}
+        for m in metric_cols:
+            mean, std = _mean_std([r[m] for r in rs])
+            row[f"{m}_mean"] = mean
+            row[f"{m}_std"] = std
+        summary.append(row)
+
+    # --- Kiírás ---
+    def fmt(row, m):
+        mean, std = row[f"{m}_mean"], row[f"{m}_std"]
+        return "–" if math.isnan(mean) else f"{mean:.4f}±{std:.4f}"
+
+    width = 118
+    print("\n" + "=" * width)
+    print(f"  Érzékenységi vizsgálat – top-{k}, split={args.split_mode}, seedek={seeds} (átlag±szórás)")
+    print("=" * width)
+    print(f"{'Modell':<14} {'Konfiguráció':<30} {f'Precision@{k}':>16} {f'Recall@{k}':>16} {f'NDCG@{k}':>16} {'RMSE':>14} {'MAE':>14}")
+    print("-" * width)
+    for row in summary:
+        print(
+            f"{row['model']:<14} {row['config']:<30} "
+            f"{fmt(row, f'Precision@{k}'):>16} {fmt(row, f'Recall@{k}'):>16} {fmt(row, f'NDCG@{k}'):>16} "
+            f"{fmt(row, 'RMSE'):>14} {fmt(row, 'MAE'):>14}"
+        )
+    print("=" * width)
+
+    # Rövid összegzés a levélben kért kérdésre
+    ndcg_key = f"NDCG@{k}_mean"
+    content_row = next((r for r in summary if r["model"] == "Content-based"), None)
+    svd_rows = [r for r in summary if r["model"] == "SVD"]
+    hyb_rows = [r for r in summary if r["model"] == "Hybrid"]
+    print("\nÖsszegzés (NDCG@%d alapján, seedek átlaga):" % k)
+    if content_row:
+        print(f"  Content-based : {fmt(content_row, f'NDCG@{k}')}")
+    if svd_rows:
+        b = max(svd_rows, key=lambda r: r[ndcg_key])
+        print(f"  Legjobb SVD   : {b['config']}  → {fmt(b, f'NDCG@{k}')}")
+    if hyb_rows:
+        b = max(hyb_rows, key=lambda r: r[ndcg_key])
+        print(f"  Legjobb Hybrid: {b['config']}  → {fmt(b, f'NDCG@{k}')}")
+    if content_row and (svd_rows or hyb_rows):
+        best_overall = max(svd_rows + hyb_rows, key=lambda r: r[ndcg_key])
+        diff = best_overall[ndcg_key] - content_row[ndcg_key]
+        print(
+            f"  Legjobb személyre szabott CF-es konfiguráció vs. Content-based: "
+            f"{diff:+.4f} NDCG (Content szórása: {content_row[f'NDCG@{k}_std']:.4f})"
+        )
+    print(
+        "  Megjegyzés: a konfigurációk a TESZT halmazon lettek összevetve → érzékenységi "
+        "vizsgálatként közöld, ne 'a teszten kiválasztott legjobb modellként'."
+    )
+
+    # --- CSV mentés ---
+    prefix = args.sweep_output_prefix
+    if prefix:
+        raw_path, sum_path = f"{prefix}_raw.csv", f"{prefix}_summary.csv"
+        with open(raw_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(raw_rows[0].keys()))
+            w.writeheader()
+            w.writerows(raw_rows)
+        with open(sum_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(summary[0].keys()))
+            w.writeheader()
+            w.writerows(summary)
+        logger.info(f"Mentve: {raw_path}, {sum_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -716,12 +1027,32 @@ def main() -> None:
         help="Ennyi userId-t válasszon véletlenszerűen (reprodukálhatóan, --seed alapján) a példákhoz, "
              "ha --example-user-ids nincs megadva",
     )
+    # --- Érzékenységi vizsgálat ---
+    parser.add_argument("--sweep", action="store_true",
+                        help="Érzékenységi vizsgálat: SVD hiperparaméter-rács × hibrid alfa × több seed")
+    parser.add_argument("--seeds", default="42,43,44", help="Sweep: vesszővel elválasztott seedek")
+    parser.add_argument("--split-mode", choices=["temporal", "random"], default="temporal",
+                        help="temporal: user-enként az időben utolsó 20%% (determinisztikus, seedtől független); "
+                             "random: user-enként véletlen 20%% (seedtől függ → a felosztás szórása is mérhető)")
+    parser.add_argument("--svd-k-list", default="100,50,32", help="Sweep: SVD látens dimenziók")
+    parser.add_argument("--svd-iter-list", default="20,50,100", help="Sweep: SVD max_iter értékek")
+    parser.add_argument("--alphas", default="0.0,0.1,0.2,0.4,0.6,0.8,1.0",
+                        help="Sweep: hibrid alfa értékek (az alfa az SVD súlya!)")
+    parser.add_argument("--svd-lr", type=float, default=SVD_DEFAULT_LR, help="Sweep: SVD tanulási ráta")
+    parser.add_argument("--svd-lambda", type=float, default=SVD_DEFAULT_LAMBDA, help="Sweep: SVD regularizáció")
+    parser.add_argument("--sweep-output-prefix", default=None,
+                        help="Sweep: CSV előtag; létrejön <prefix>_raw.csv és <prefix>_summary.csv")
     args = parser.parse_args()
 
     # --- Adatbetöltés ---
     ratings = load_ratings(args.ratings_csv)
     genres_map = load_genres(args.movies_csv)
     genome_map = load_genome_scores(args.genome_csv)
+
+    if args.sweep:
+        run_sweep(args, ratings, genres_map, genome_map)
+        return
+
     movie_titles = load_movie_titles(args.movies_csv)
 
     # --- Train/test split ---
@@ -747,7 +1078,6 @@ def main() -> None:
         user_test[uid].append((mid, r))
 
     # --- Jelölthalmaz: a train-ben legtöbbször értékelt filmek ---
-    from collections import Counter
     movie_counts = Counter(mid for _, mid, _ in train)
     candidate_pool = [mid for mid, _ in movie_counts.most_common(args.candidate_pool_size)]
     logger.info(f"Jelölthalmaz mérete: {len(candidate_pool)}")

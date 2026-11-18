@@ -73,18 +73,6 @@
         </div>
 
     </div>
-
-    <!-- Visszajelzés gombok (implicit feedback) -->
-    <div v-if="auth.isLoggedIn" class="flex gap-3 mb-6">
-      <button
-        class="btn-secondary text-sm"
-        :class="{ 'opacity-50': interactionSent }"
-        :disabled="interactionSent"
-        @click="recordInteraction('watchlist_add')"
-      >
-        ❤️ Mentés
-      </button>
-    </div>
   </div>
 
   <div v-else class="card text-center py-16">

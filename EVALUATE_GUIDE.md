@@ -17,6 +17,8 @@ Az `evaluate.py` összehasonlítja a négy ajánlómodellt **ugyanazon rögzíte
 - **NDCG@K** – rangsor minőség (korábbi találat = nagyobb súly)
 - **RMSE / MAE** – csak SVD-nél: becsült vs. tényleges értékelés különbsége
 
+**Érzékenységi vizsgálat (`--sweep`):** a fenti négy módszer mellett az SVD hiperparamétereit (`k`, `max_iter`), a hibrid α súlyát és a seedeket variálja, és seedek közötti átlag ± szórást ad – lásd az „Érzékenységi vizsgálat” részt.
+
 **Konkrét felhasználói példák:** az aggregált táblázat mellett a script egy–egy kiválasztott felhasználóra (userId) kilistázza a kedvelt filmjeit és a négy módszer ajánlását egymás mellett – lásd a „Konkrét felhasználói példák” részt.
 
 ---
@@ -101,6 +103,47 @@ docker compose -f docker-compose.yml -f docker-compose.evaluate.yml cp \
 
 ---
 
+### 3. módszer – érzékenységi vizsgálat (`--sweep`)
+
+Az SVD-rács × hibrid α × seed vizsgálat. A `docker-compose.evaluate.yml` `command:` sorát a `run` után megadott argumentumok felülírják, ezért nem kell a fájlt módosítani. Az eredmény a host `out/` mappájába kerül (`-v "$PWD/out:/out"`).
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.evaluate.yml build evaluate
+
+# A) időalapú felosztás (a fő táblával összevethető; a szórás csak az SVD inicializálásából jön)
+docker compose -f docker-compose.yml -f docker-compose.evaluate.yml run --rm evaluate \
+  --sweep --split-mode temporal --seeds 42,43,44 --k 10 \
+  --ratings-csv ./dataset/ml-latest-small/ratings.csv \
+  --movies-csv  ./dataset/ml-latest-small/movies.csv \
+  --genome-csv  ./dataset/ml-latest-small/genome-scores.csv \
+  --svd-k-list 100,50,32 --svd-iter-list 20,50,100 \
+  --alphas 0.0,0.1,0.2,0.4,0.6,0.8,1.0 \
+  --sweep-output-prefix /var/lib/recommender_model/data/sweep_temporal
+
+# B) véletlen felosztás (a felosztás szórása is mérhető)
+docker compose -f docker-compose.yml -f docker-compose.evaluate.yml run --rm evaluate \
+  --sweep --split-mode random --seeds 42,43,44 --k 10 \
+  --ratings-csv ./dataset/ml-latest-small/ratings.csv \
+  --movies-csv  ./dataset/ml-latest-small/movies.csv \
+  --genome-csv  ./dataset/ml-latest-small/genome-scores.csv \
+  --svd-k-list 100,50,32 --svd-iter-list 20,50,100 \
+  --alphas 0.0,0.1,0.2,0.4,0.6,0.8,1.0 \
+  --sweep-output-prefix /var/lib/recommender_model/data/sweep_random
+```
+
+**Kimenet:** a konzolon az átlag ± szórás tábla és egy rövid összegzés; a `--sweep-output-prefix` megadásakor két CSV: `<prefix>_raw.csv` (seedenként, páros különbségekhez) és `<prefix>_summary.csv` (3 seed átlaga és szórása). A konfigurációk neve `k=<k>,iter=<max_iter>` (hibridnél `,alpha=<α>` is).
+
+**Futásidő:** 9 SVD-konfiguráció × 3 seed × 2 felosztás tanítás. Gyorsításhoz szűkítheted a rácsot, pl. `--svd-k-list 100 --svd-iter-list 20,50`.
+
+**Fontos:**
+- Az α az **SVD-komponens súlya**: α = 0 a tiszta Content-based, α = 1 a tiszta SVD. Az α csökkentésével a hibrid a Content-based-hez közelít.
+- A sweep minden SVD-konfigurációt a train halmazból tanít, a `svd.pkl`-t nem használja.
+- A konfigurációk a **teszt halmazon** vannak összevetve. A legjobb sor értéke ezért optimista; érzékenységi vizsgálatként közöld, ne a teszten kiválasztott végleges modellként.
+- Időalapú felosztáson a Popularity és a Content-based szórása 0 (determinisztikus felosztás); a véletlen felosztás szórása a felosztást is tartalmazza. 3 seednél a szórás durva becslés.
+- A két felosztás abszolút értékei nem hasonlíthatók össze (a véletlen felosztás mindhárom módszernek könnyebb).
+
+---
+
 ## Paraméterek
 
 ```bash
@@ -129,6 +172,14 @@ python -m src.backend.app.recommender.evaluate \
 | `--output` | – | Ha megadod, CSV-be is menti az eredményt (csak az aggregált táblát, a példákat nem) |
 | `--example-user-ids` | – | Vesszővel elválasztott userId lista a konkrét példákhoz, pl. `116,26,91` |
 | `--example-users-count` | 0 | Ennyi felhasználót választ véletlenszerűen (a `--seed` miatt reprodukálhatóan) példának, ha `--example-user-ids` nincs megadva |
+| `--sweep` | kikapcsolva | Érzékenységi vizsgálat mód (lásd fent). Bekapcsolva a fő tábla és a példák nem futnak le |
+| `--seeds` | `42,43,44` | Sweep: vesszővel elválasztott seedek |
+| `--split-mode` | `temporal` | Sweep: `temporal` (időrendben utolsó 20%, determinisztikus) vagy `random` (véletlen 20%, seedfüggő). **Csak `--sweep` mellett hat**, a normál mód mindig időalapú |
+| `--svd-k-list` | `100,50,32` | Sweep: SVD látens dimenziók |
+| `--svd-iter-list` | `20,50,100` | Sweep: SVD `max_iter` értékek |
+| `--alphas` | `0.0,0.1,0.2,0.4,0.6,0.8,1.0` | Sweep: hibrid α értékek (az SVD súlya) |
+| `--svd-lr` / `--svd-lambda` | `0.01` / `0.02` | Sweep: SVD tanulási ráta és regularizáció (rögzítettek, nem rács) |
+| `--sweep-output-prefix` | – | Sweep: CSV előtag (`<prefix>_raw.csv`, `<prefix>_summary.csv`) |
 
 > **Fontos:** a `--ratings-csv` alapértelmezett értéke (`data/...`) a helyi fejlesztésre vonatkozik.
 > Docker konténerben mindig add meg explicit módon: `--ratings-csv ./dataset/ml-latest-small/ratings.csv`
@@ -183,20 +234,32 @@ Az eddigi futás tanulságai (dolgozat: *Eredmények → Konkrét felhasználói
 
 ## Várható kimenet
 
+Normál mód (`--k 10`, időalapú felosztás, `--seed 42`; a valós futás eredménye, lásd `docs/06_release/evaluation_results.md`):
+
 ```
 ===========================================================================
   Ajánlórendszer offline kiértékelés – top-10
 ===========================================================================
 Modell            Precision@K   Recall@K     NDCG@K     RMSE      MAE    Users
 ---------------------------------------------------------------------------
-Popularity             0.0410     0.0258     0.0262        –        –      591
-Content-based           0.0520     0.0414     0.0587        –        –      591
-SVD                    0.0098     0.0072     0.0130   0.8862   0.6851      591
-Hybrid                  0.0355     0.0245     0.0364        –        –      591
+Popularity             0.0220     0.0258     0.0262        –        –      591
+Content-based          0.0462     0.0414     0.0587        –        –      591
+SVD                    0.0134     0.0072     0.0130   0.8862   0.6851      591
+Hybrid                 0.0294     0.0245     0.0364        –        –      591
 ===========================================================================
 ```
 
-(A fenti számok illusztrációk; a tényleges futtatás a lenti "Eredmények értelmezése" alapján rögzítendők.)
+Sweep mód: egy sor konfigurációnként, átlag±szórás formában (a számok az időalapú futásból valók, `k=100,iter=50`):
+
+```
+Modell         Konfiguráció                       Precision@10        Recall@10          NDCG@10
+Popularity     -                                 0.0220±0.0000    0.0258±0.0000    0.0262±0.0000
+Content-based  -                                 0.0462±0.0000    0.0414±0.0000    0.0587±0.0000
+SVD            k=100,iter=50                     0.0260±0.0006    0.0204±0.0010    0.0317±0.0020
+Hybrid         k=100,iter=50,alpha=0.2           0.0457±0.0002    0.0401±0.0002    0.0603±0.0005
+```
+
+Az eddigi sweep-eredmények értelmezése: `docs/06_release/evaluation_results.md` 5. fejezete.
 
 ---
 
@@ -205,10 +268,8 @@ Hybrid                  0.0355     0.0245     0.0364        –        –      
 ### Adatszivárgás elkerülése
 A script a teszt értékeléseket **nem** adja hozzá a train halmazhoz, és a candidate pool is csak a train adatból épül fel – így a popularity modell sem „lát előre".
 
+### Hibrid α iránya
+A kódban az `alpha` az SVD súlya (`alpha * SVD + (1 - alpha) * Content`). A korábbi α = 0,6 beállítás mindkét felosztáson rontotta a Content-based eredményét; α ≈ 0,1–0,2 körül a hibrid a Content-based szintjén vagy kissé fölötte van.
+
 ### Saját alkalmazás felhasználói vs. MovieLens
 A MovieLens offline eredmények a **modell képességét** mérik a MovieLens adatbázison. A saját alkalmazás új felhasználói cold start helyzetben indulnak – ezt a `hybrid.py` popularity és content-based fallbackjei kezelik.
-
-### Eredmények értelmezése (kötelező a november 6-i leadáshoz)
-Az eredménytábla önmagában nem elég – Vilmos kifejezetten kéri, hogy néhány jellemző példán mutasd be, hol segített és hol nem segített a személyre szabás, és mi lehet ennek az oka (pl. candidate pool mérete, SVD alulillesztettsége kevés iterációnál, adatritkaság). Nem elvárás, hogy a hibrid mindenhol nyerjen; a megalapozott következtetés a fontos.
-
-Ehhez használd a fenti **konkrét felhasználói példákat** (`--example-user-ids` / `--example-users-count`): a kimenetet mentsd el, a kiválasztott példákat és magyarázatukat pedig rögzítsd a `docs/04_quality/test_report.md` vagy egy külön `docs/06_release/evaluation_results.md` fájlban, a CSV-re és a példa-kimenetre hivatkozva mint evidence.
